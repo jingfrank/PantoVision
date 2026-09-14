@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+AI 实时故障检测与告警上报引擎 (ai_detector.py).
+采用 6 层插件化分层架构 (Layered Plugin Architecture):
+1. 数据接入层 (Ingestion): 支持多路 RTSP 异步重连拉流与离线视频播放
+2. 检测调度层 (Scheduler): detectors.yaml 驱动、注册表反射、多频调度与沙箱失败隔离
+3. 检测器插件层 (Detectors): 统一 BaseDetector (YOLO-火花/飘弓, FastAD-脏污/异物/结构, HRNet-倾斜)
+4. 结果融合层 (Fusion): 跨模块互斥抑制、时序平滑与综合告警裁决
+5. 状态与环形缓冲 (Buffer): JPEG 环形队列 + 前后 60s 录像无缝合成
+6. 输出层 (Output): 0xFF 0x20 标准二进制报文 + 3+2 OSD 水印与工业 HUD 标注
+"""
+
+import os
+import sys
+import time
+import logging
+import threading
+from typing import Optional, Dict, Any, Set
+
+# 确保本工程根目录与 fastad_core 在 sys.path
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
+FASTAD_CORE = os.path.join(BASE_DIR, "fastad_core")
+if os.path.exists(FASTAD_CORE) and FASTAD_CORE not in sys.path:
+    sys.path.append(FASTAD_CORE)
+
+from core.data_types import FramePacket, FusionResult
+from core.scheduler import DetectionScheduler
+from core.fusion import FusionEngine, FAULT_NAME_MAP
+from core.ingestion import RTSPStreamReader, VideoFileReader, RingFrameBuffer
+from core.output import UDPAlarmSender, StorageManager, Visualizer
+
+logger = logging.getLogger("ai_detector")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+FAULT_CODE_MAP = {
+    "big_spark": 3,
+    "structure_abnormal": 4,
+    "dirty": 10,
+    "tilt": 12,
+    "foreign_object": 14,
+    "abnormal_float": 15,
+}
+
+
+class PantographFaultDetector:
+    """
+    分层架构受电弓故障检测器服务.
+    对 monitor_main.py, phm_service.py 和部署脚本保持 100% 向后兼容.
+    """
+
+    def __init__(
+        self,
+        global_cfg: Dict[str, Any],
+        stream_cfg: Dict[str, Any],
+        udp_sock: Any,
+        stop_event: threading.Event,
+        vlm_engine: Optional[Any] = None,
+        detectors_yaml_path: str = "config/detectors.yaml"
+    ):
+        self.global_cfg = global_cfg
+        self.stream_cfg = stream_cfg
+        self.udp_sock = udp_sock
+        self.stop_event = stop_event
+
+        self.hw_cfg = global_cfg.get("hardware_config", {})
+        self.vs_cfg = global_cfg.get("video_stream_config", {})
+        self.alarm_cfg = global_cfg.get("alarm_push_config", {})
+
+        self.rtsp_url = stream_cfg.get("rtsp_url", "")
+        self.camera_id = stream_cfg.get("camera_id", self.hw_cfg.get("camera_id", 0))
+        self.car_number = stream_cfg.get("car_number", self.hw_cfg.get("car_number", 6))
+        self.result_base_dir = stream_cfg.get("result_base_dir", "./local_cache/Algo-result")
+        self.train_id = global_cfg.get("train_id", "CR400BF")
+
+        # 1. 初始化检测调度层 (配置驱动 + 注册表自动装配 + 失败隔离)
+        config_file = detectors_yaml_path
+        if not os.path.isabs(config_file):
+            config_file = os.path.join(BASE_DIR, config_file)
+        self.scheduler = DetectionScheduler(config_file)
+
+        # 2. 初始化结果融合层
+        self.fusion = FusionEngine()
+
+        # 3. 初始化环形缓冲层 (前后 60 秒)
+        fps = float(self.vs_cfg.get("fps", 25.0))
+        self.ring_buffer = RingFrameBuffer(fps=fps, pre_record_sec=60, post_record_sec=60)
+
+        # 4. 初始化输出层组件
+        udp_ip = self.alarm_cfg.get("udp_ip", "127.0.0.1")
+        udp_port = int(self.alarm_cfg.get("udp_port", 8080))
+        self.udp_sender = UDPAlarmSender(udp_ip=udp_ip, udp_port=udp_port)
+        self.storage = StorageManager(base_result_dir=self.result_base_dir, pre_sec=60, post_sec=60)
+        self.visualizer = Visualizer()
+
+        # 5. 状态寄存器 (对齐 usrcode.py 与 PHM)
+        self._current_active_fault_types: Set[str] = set()
+        self._last_active_fault_types: Set[str] = set()
+
+    # 供 usrcode.py 和 PHM 周期心跳读取的属性映射
+    @property
+    def spark_alarmed(self) -> bool:
+        return "big_spark" in self._current_active_fault_types
+
+    @property
+    def structure_alarmed(self) -> bool:
+        return "structure_abnormal" in self._current_active_fault_types
+
+    @property
+    def dirty_alarmed(self) -> bool:
+        return "dirty" in self._current_active_fault_types
+
+    @property
+    def tilt_alarmed(self) -> bool:
+        return "tilt" in self._current_active_fault_types
+
+    @property
+    def foreign_alarmed(self) -> bool:
+        return "foreign_object" in self._current_active_fault_types
+
+    @property
+    def float_alarmed(self) -> bool:
+        return "abnormal_float" in self._current_active_fault_types
+
+    def _create_stream_source(self):
+        """根据配置自动适配 RTSP 实时网络流或本地测试视频文件"""
+        if self.rtsp_url.startswith("rtsp://") or self.rtsp_url.startswith("rtsps://"):
+            return RTSPStreamReader(
+                rtsp_url=self.rtsp_url,
+                car_number=self.car_number,
+                camera_id=self.camera_id,
+                train_id=self.train_id
+            )
+        else:
+            local_path = self.rtsp_url
+            if not os.path.isabs(local_path):
+                local_path = os.path.join(BASE_DIR, local_path)
+            return VideoFileReader(
+                file_path=local_path,
+                car_number=self.car_number,
+                camera_id=self.camera_id,
+                train_id=self.train_id
+            )
+
+    def run(self) -> None:
+        """主检测服务运行循环"""
+        logger.info(f"[AI-CAR{self.car_number}-CAM{self.camera_id}] 启动分层检测服务, 视频源: {self.rtsp_url}")
+        stream_source = self._create_stream_source()
+        stream_source.start()
+
+        try:
+            while not self.stop_event.is_set():
+                packet: Optional[FramePacket] = stream_source.get_packet(timeout=1.0)
+                if packet is None:
+                    if isinstance(stream_source, VideoFileReader):
+                        logger.info(f"[AI-CAR{self.car_number}-CAM{self.camera_id}] 离线视频处理完毕")
+                        break
+                    continue
+
+                # 1. 调度层：各检测器插件沙箱安全推理
+                raw_results = self.scheduler.dispatch(packet)
+
+                # 2. 融合层：跨模块抑制、时序平滑与仲裁
+                fusion_res: FusionResult = self.fusion.decide(raw_results, packet)
+
+                # 3. 更新当前生效的告警状态
+                self._current_active_fault_types = {
+                    alarm["fault_type"] for alarm in fusion_res.active_alarms
+                }
+
+                # 4. 边沿触发检测 (仅在故障首次由 0 -> 1 时触发抓拍落盘与报文发射)
+                newly_triggered = self._current_active_fault_types - self._last_active_fault_types
+
+                hud_frame = None
+                if fusion_res.has_fault or newly_triggered or len(self.ring_buffer.pending_tasks) > 0:
+                    hud_frame = self.visualizer.render_hud(packet.frame, fusion_res, packet)
+
+                if newly_triggered:
+                    for f_type in newly_triggered:
+                        chinese_name = FAULT_NAME_MAP.get(f_type, f_type)
+                        fault_code = FAULT_CODE_MAP.get(f_type, 0)
+                        cfg_level = self.alarm_cfg.get("fault_levels", {}).get(chinese_name, 1)
+
+                        # (a) 保存故障时刻高质量抓拍
+                        pic_path = self.storage.save_snapshot(
+                            frame=hud_frame if hud_frame is not None else packet.frame,
+                            timestamp=packet.timestamp,
+                            fault_code=fault_code
+                        )
+
+                        # (b) 发射 0xFF 0x20 车端标准二进制报文
+                        self.udp_sender.send_alarm(
+                            event_name=chinese_name,
+                            car_number=self.car_number,
+                            camera_id=self.camera_id,
+                            picture_path=pic_path,
+                            level=cfg_level,
+                            fault_code=fault_code
+                        )
+
+                        # (c) 触发前后 60 秒录像收集任务
+                        base_name, save_dir = self.storage.generate_base_name(packet.timestamp, fault_code)
+                        self.ring_buffer.trigger_recording(
+                            event_name=chinese_name,
+                            fault_code=fault_code,
+                            fault_ts=packet.timestamp,
+                            save_dir=save_dir,
+                            base_name=base_name
+                        )
+
+                self._last_active_fault_types = set(self._current_active_fault_types)
+
+                # 5. 环形缓冲：收集后60秒帧与定期合成完整视频
+                cache_frame = hud_frame if hud_frame is not None else packet.frame
+                self.ring_buffer.append(packet.timestamp, cache_frame)
+                self.ring_buffer.collect_post_frame(packet.timestamp, cache_frame)
+                self.ring_buffer.finalize_recordings(packet.timestamp)
+
+        except Exception as e:
+            logger.error(f"[AI-CAR{self.car_number}-CAM{self.camera_id}] 主循环异常: {e}", exc_info=True)
+        finally:
+            stream_source.stop()
+            self.udp_sender.close()
+            logger.info(f"[AI-CAR{self.car_number}-CAM{self.camera_id}] 检测服务已安全停止")

@@ -1,0 +1,10 @@
+# Jetson AGX Orin ARM64 业务依赖 (基于 dustynv/transformers:nvgpt-r35.33.1)
+# ⚠️ 严禁覆盖或重装 torch / transformers，直接复用镜像内置的 Jetson 硬件加速环境
+openpyxl
+Pillow
+pyyaml
+opencv-python-headless
+ultralytics
+
+
+

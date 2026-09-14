@@ -1,0 +1,106 @@
+# ==============================================================================
+# 受电弓故障监测系统 - 插件化检测器注册与调度配置 (detectors.yaml)
+# ==============================================================================
+
+global:
+  device: "cuda:0"
+  fallback_device: "cpu"
+  enable_shared_context: true # 开启黑板机制，跨检测器复用受电弓定位
+
+detectors:
+  # -------------------------------------------------------------
+  # 1. 大火花检测器 (YOLOv11 语义驱动)
+  # -------------------------------------------------------------
+  - name: "spark"
+    type: "YoloSparkDetector"
+    enabled: true # 开关：现场可单独停用
+    schedule:
+      mode: "every_frame" # 30 FPS 逐帧运行，保障 700ms 大火花捕获
+      interval_frames: 1
+    params:
+      model_path: "models/best.pt"
+      conf_thresh: 0.30
+      spark_area_ratio: 0.05 # 火花/受电弓面积比
+      spark_min_area: 400 # 最小火花像素面积
+      spark_duration_frames: 12 # ~500ms 持续时间
+
+  # -------------------------------------------------------------
+  # 2. 画面脏污检测器 (FastAD 时序网格)
+  # -------------------------------------------------------------
+  - name: "dirt"
+    type: "FastadDirtDetector"
+    enabled: true
+    schedule:
+      mode: "interval" # 1Hz 采样周期运行 (秒级累积)
+      sample_interval_sec: 1.0
+    params:
+      model_path: "models/fastad_layer2_256_reg1e4_nq3_fmq1.pt"
+      grid_size: 64
+      ema_decay: 0.85
+      persistence_frames: 4
+      min_active_cells: 6
+      dirt_score_thresh: 2.0
+
+  # -------------------------------------------------------------
+  # 3. 受电弓倾斜检测器 (HRNet 4 关键点下横梁浮动坐标系)
+  # -------------------------------------------------------------
+  - name: "tilt"
+    type: "HrnetTiltDetector"
+    enabled: true
+    schedule:
+      mode: "interval" # 1Hz 采样运行 (秒级机械形变)
+      sample_interval_sec: 1.0
+    params:
+      weights_path: "models/best_hrnet_w32_panto.pth"
+      width: 32
+      num_joints: 4
+      target_size: [288, 384] # HRNet 输入图像尺寸 (H, W)
+      heatmap_size: [72, 96] # 1/4 特征图热图尺寸
+      structural_warning_thresh: 5
+      structural_alarm_thresh: 5
+      consecutive_alarms: 3
+
+  # -------------------------------------------------------------
+  # 4. 异常飘弓检测器 (YOLO 垂直中心时序轨迹)
+  # -------------------------------------------------------------
+  - name: "float"
+    type: "YoloFloatDetector"
+    enabled: true
+    schedule:
+      mode: "every_frame"
+      interval_frames: 1
+    params:
+      window_size: 30 # 轨迹滑动窗口帧数
+      float_speed_thresh: 200.0 # 垂向突跳速度门限 (px/s，过滤正常轨道垂向震颤)
+      panto_down_height_limit: 70 # 降弓高度限值 (px)
+      consecutive_alarm_frames: 5 # ~400ms 持续门限
+
+  # -------------------------------------------------------------
+  # 5. 受电弓结构异常 (FastAD + YOLO 受电弓几何Mask)
+  # -------------------------------------------------------------
+  - name: "structural"
+    type: "FastadStructDetector"
+    enabled: true
+    schedule:
+      mode: "interval"
+      sample_interval_sec: 1.0
+    params:
+      model_path: "models/fastad_layer2_256_reg1e4_nq3_fmq1.pt"
+      min_defect_area: 250
+      pantograph_roi_ratio: [0.15, 0.15, 0.85, 0.70]
+
+  # -------------------------------------------------------------
+  # 6. 悬挂异物检测器 (FastAD 接触网开集 + YOLO 闭集)
+  # -------------------------------------------------------------
+  - name: "foreign_object"
+    type: "FastadForeignDetector"
+    enabled: true
+    schedule:
+      mode: "interval"
+      sample_interval_sec: 1.0
+    params:
+      model_path: "models/fastad_layer2_256_reg1e4_nq3_fmq1.pt"
+      catenary_roi_ratio: [0.25, 0.25, 0.85, 0.50]
+      min_foreign_area: 100
+      max_blobs_filter: 12
+      foreign_score_threshold: 2.2

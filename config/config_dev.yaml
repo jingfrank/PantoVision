@@ -1,0 +1,64 @@
+# ==============================================================================
+# 弓网AI监测算法包 (gongwang_monitor, algo_id=10008)
+# ==============================================================================
+
+hardware_config:
+  car_number: 6
+  camera_id: 0
+
+video_stream_config:
+  streams:
+    - rtsp_url: "./弓网典型视频/dirty_1.mp4"
+      camera_id: 0
+      car_number: 6
+      result_base_dir: "./local_cache/Algo-result"
+      ftp_remote_dir: "nvme1/Algo-result"
+  fps: 30
+  img_size: 640
+  ffmpeg_restart_delay: 5
+
+base_algorithm_config:
+  engine_type: "layered_detector"
+  detectors_config: "config/detectors.yaml"
+
+alarm_push_config:
+  udp_ip: "127.0.0.1"
+  udp_port: 8080
+  spark_duration_ms: 700
+  common_response_time_s: 3
+  dirty_check_window_min: 3
+  fault_levels:
+    "大火花": 1
+    "受电弓结构异常": 1
+    "悬挂异物": 2
+    "画面脏污": 2
+    "受电弓倾斜": 2
+    "异常飘弓": 2
+
+phm_config:
+  enabled: true
+  host_addrs:
+    - ["172.10.1.188", 33000]
+    - ["127.0.0.1", 33000]
+  monitor:
+    algo_id: 10008
+    algo_port: 39008
+    app_config: "AppConfig.xlsx"
+    output_interval_ms: 1000
+    log_status: false
+    log_output: false
+
+ftp_config:
+  enabled: true
+  host: "172.10.1.2"
+  port: 21
+  username: "ftpuser"
+  password: "Hirain123"
+  passive: true
+  timeout: 30
+  cleanup_threshold: 0.80
+  cleanup_target_ratio: 0.60
+  max_storage_size_gb: 600.0
+  clean_paths:
+    - "nvme1/Algo-result"
+  monitor_remote_dir: "nvme1/Algo-result"
