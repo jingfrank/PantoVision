@@ -130,6 +130,14 @@ class FusionEngine:
 
             primary_fault = f"异常-{chosen['chinese_name']}"
 
+        # 按 PRIORITY_ORDER 对告警列表排序，确保 active_alarms[0] 始终是最高优先级故障
+        # 供 render_hud 分发器通过 active_alarms[0] 可靠获取主告警类型
+        def _alarm_priority(alarm):
+            ft = alarm.get("fault_type", "")
+            return PRIORITY_ORDER.index(ft) if ft in PRIORITY_ORDER else len(PRIORITY_ORDER)
+
+        active_alarms.sort(key=_alarm_priority)
+
         return FusionResult(
             has_fault=has_fault,
             primary_fault=primary_fault,
