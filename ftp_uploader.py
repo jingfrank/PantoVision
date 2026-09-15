@@ -120,6 +120,16 @@ class FtpUploader:
         try:
             os.remove(local_path)
             print(f"[FTP] 已删除容器本地文件: {local_path}")
+            # 若所在事件独立目录已空，一并清理空目录，避免遗留碎片文件夹
+            try:
+                parent_dir = os.path.dirname(local_path)
+                if os.path.exists(parent_dir) and not os.listdir(parent_dir):
+                    os.rmdir(parent_dir)
+                    daily_dir = os.path.dirname(parent_dir)
+                    if os.path.exists(daily_dir) and not os.listdir(daily_dir):
+                        os.rmdir(daily_dir)
+            except OSError:
+                pass
             return True
         except OSError as e:
             print(f"[FTP] 上传成功但删除本地失败: {local_path}, 错误: {e}")

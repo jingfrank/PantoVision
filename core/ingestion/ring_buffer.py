@@ -89,8 +89,12 @@ class RingFrameBuffer:
                         total_span = max(1.0, task["end_ts"] - task["start_ts"])
                         effective_fps = len(all_jpegs) / total_span
 
-                        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                        # 优先采用车规标准 H.264 (avc1) 编码，若失败回退至 mp4v
+                        fourcc = cv2.VideoWriter_fourcc(*"avc1")
                         writer = cv2.VideoWriter(video_path, fourcc, float(effective_fps), (w, h))
+                        if not writer.isOpened():
+                            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                            writer = cv2.VideoWriter(video_path, fourcc, float(effective_fps), (w, h))
 
                         for j_bytes in all_jpegs:
                             img = cv2.imdecode(j_bytes, cv2.IMREAD_COLOR)

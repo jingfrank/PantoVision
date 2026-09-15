@@ -77,7 +77,10 @@ class PantographFaultDetector:
             "ftp_remote_dir",
             global_cfg.get("ftp_config", {}).get("monitor_remote_dir", "nvme1/Algo-result")
         )
-        self.train_id = global_cfg.get("train_id", "CR400BF")
+        self.train_id = stream_cfg.get(
+            "train_id",
+            global_cfg.get("train_id", self.hw_cfg.get("train_id", "CR400BF"))
+        )
 
         # 1. 初始化检测调度层 (配置驱动 + 注册表自动装配 + 失败隔离)
         config_file = detectors_yaml_path
@@ -96,7 +99,12 @@ class PantographFaultDetector:
         udp_ip = self.alarm_cfg.get("udp_ip", "127.0.0.1")
         udp_port = int(self.alarm_cfg.get("udp_port", 8080))
         self.udp_sender = UDPAlarmSender(udp_ip=udp_ip, udp_port=udp_port)
-        self.storage = StorageManager(base_result_dir=self.result_base_dir, pre_sec=60, post_sec=60)
+        self.storage = StorageManager(
+            base_result_dir=self.result_base_dir,
+            pre_sec=60,
+            post_sec=60,
+            train_id=self.train_id
+        )
         self.visualizer = Visualizer()
 
         # 5. 状态寄存器 (对齐 usrcode.py 与 PHM)
@@ -219,15 +227,20 @@ class PantographFaultDetector:
                         fault_code = FAULT_CODE_MAP.get(f_type, 0)
                         cfg_level = self.alarm_cfg.get("fault_levels", {}).get(chinese_name, 1)
 
-                        # (a) 保存故障时刻高质量抓拍并异步上传 NAS
+                        # (a) 生成车载规范化基名与独立事件目录
+                        base_name, save_dir = self.storage.generate_base_name(packet.timestamp, fault_code)
+
+                        # (b) 保存故障时刻高质量抓拍并异步上传 NAS
                         pic_path = self.storage.save_snapshot(
                             frame=hud_frame if hud_frame is not None else packet.frame,
                             timestamp=packet.timestamp,
-                            fault_code=fault_code
+                            fault_code=fault_code,
+                            base_name=base_name,
+                            save_dir=save_dir
                         )
                         self._ftp_upload_local_file(pic_path)
 
-                        # (b) 发射 0xFF 0x20 车端标准二进制报文
+                        # (c) 发射 0xFF 0x20 车端标准二进制报文 (携带规范化图片绝对路径)
                         self.udp_sender.send_alarm(
                             event_name=chinese_name,
                             car_number=self.car_number,
@@ -237,8 +250,7 @@ class PantographFaultDetector:
                             fault_code=fault_code
                         )
 
-                        # (c) 触发前后 60 秒录像收集任务
-                        base_name, save_dir = self.storage.generate_base_name(packet.timestamp, fault_code)
+                        # (d) 触发前后 60 秒录像收集任务
                         self.ring_buffer.trigger_recording(
                             event_name=chinese_name,
                             fault_code=fault_code,
