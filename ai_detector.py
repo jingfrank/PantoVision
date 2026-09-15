@@ -31,6 +31,7 @@ from core.scheduler import DetectionScheduler
 from core.fusion import FusionEngine, FAULT_NAME_MAP
 from core.ingestion import RTSPStreamReader, VideoFileReader, RingFrameBuffer
 from core.output import UDPAlarmSender, StorageManager, Visualizer, draw_osd_watermark
+from core.perf_monitor import PerformanceMonitor
 
 logger = logging.getLogger("ai_detector")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -110,6 +111,15 @@ class PantographFaultDetector:
         # 5. 状态寄存器 (对齐 usrcode.py 与 PHM)
         self._current_active_fault_types: Set[str] = set()
         self._last_active_fault_types: Set[str] = set()
+
+        # 6. 实时性能监控器
+        perf_cfg = global_cfg.get("log_config", {}).get("perf_monitor", {})
+        self.perf_monitor = PerformanceMonitor(
+            source_fps=float(self.vs_cfg.get("fps", 25.0)),
+            report_interval_sec=float(perf_cfg.get("report_interval_sec", 10.0)),
+            enabled=bool(perf_cfg.get("enabled", True)),
+            logger_name=f"perf_monitor.CAR{self.car_number}.CAM{self.camera_id}",
+        )
 
     # 供 usrcode.py 和 PHM 周期心跳读取的属性映射
     @property
@@ -203,6 +213,9 @@ class PantographFaultDetector:
                         break
                     continue
 
+                # ── 帧处理端到端计时开始 ──────────────────────────────────
+                t_frame_start = time.perf_counter()
+
                 # 1. 调度层：各检测器插件沙箱安全推理
                 raw_results = self.scheduler.dispatch(packet)
 
@@ -269,6 +282,16 @@ class PantographFaultDetector:
                 if completed_videos:
                     for vid_path in completed_videos:
                         self._ftp_upload_local_file(vid_path)
+
+                # 6. 性能监控 tick（在本帧所有处理完成后计算端到端耗时）
+                wall_ms = (time.perf_counter() - t_frame_start) * 1000.0
+                queue_depth = 0
+                if hasattr(stream_source, "frame_queue"):
+                    try:
+                        queue_depth = stream_source.frame_queue.qsize()
+                    except Exception:
+                        pass
+                self.perf_monitor.tick(packet, raw_results, wall_ms, queue_depth)
 
         except Exception as e:
             logger.error(f"[AI-CAR{self.car_number}-CAM{self.camera_id}] 主循环异常: {e}", exc_info=True)

@@ -2,6 +2,18 @@
 
 import os
 
+# 板卡统一日志根目录（按算法 ID 分子目录）；algo_log 缺失时自动创建
+BOARD_LOG_ROOT = "/hirain/hi_opt/algo_log"
+# 板卡部署根目录，存在即视为板卡环境
+BOARD_ROOT_MARKER = "/hirain/hi_opt"
+
+
+def resolve_log_root() -> str:
+    """日志根目录：板卡用 /hirain/hi_opt/algo_log，开发机回退到 local_cache/logs。"""
+    if os.path.isdir(BOARD_ROOT_MARKER):
+        return BOARD_LOG_ROOT
+    return "local_cache/logs"
+
 
 def convert_to_hex(version_text):
     numbers = [int(part) for part in str(version_text).split(".")]

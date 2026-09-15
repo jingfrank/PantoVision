@@ -74,3 +74,15 @@ ftp_config:
   clean_paths:
     - "nvme1/Algo-result"
   monitor_remote_dir: "nvme1/Algo-result"
+
+log_config:
+  enabled: true           # 总开关：true=同时写文件日志；false=仅控制台输出
+  level: "INFO"           # 日志级别：DEBUG / INFO / WARNING / ERROR
+  log_dir: ""             # 留空则自动选择路径（板卡: /hirain/hi_opt/algo_log/monitor，开发机: local_cache/logs/monitor）
+  max_bytes: 10485760     # 单个日志文件上限（默认 10 MB）
+  backup_count: 5         # 轮转保留备份数量
+
+  # 算法实时性能监控（每隔 report_interval_sec 秒在日志中输出一次汇报）
+  perf_monitor:
+    enabled: true             # false 则完全关闭，零开销
+    report_interval_sec: 10.0 # 汇报周期（秒），Jetson 测试建议 5~10s

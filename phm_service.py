@@ -44,6 +44,9 @@ def create_monitor_phm_reporter(global_cfg, detectors, package_dir=None):
         f"[PHM] 输出字段: {OUTPUT_FIELD_NAMES}"
     )
 
+    # log_enabled 由顶层 log_config.enabled 控制
+    log_enabled = bool(global_cfg.get("log_config", {}).get("enabled", True))
+
     return PhmBackgroundReporter(
         algo_id=int(monitor_cfg.get("algo_id", 10008)),
         algo_port=int(monitor_cfg.get("algo_port", 39008)),
@@ -53,5 +56,6 @@ def create_monitor_phm_reporter(global_cfg, detectors, package_dir=None):
         output_interval_ms=int(monitor_cfg.get("output_interval_ms", 1000)),
         log_status=bool(monitor_cfg.get("log_status", True)),
         log_output=bool(monitor_cfg.get("log_output", True)),
+        log_enabled=log_enabled,
         output_field_names=OUTPUT_FIELD_NAMES,
     )

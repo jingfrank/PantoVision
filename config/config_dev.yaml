@@ -63,3 +63,16 @@ ftp_config:
   clean_paths:
     - "nvme1/Algo-result"
   monitor_remote_dir: "nvme1/Algo-result"
+
+log_config:
+  enabled: false          # 开发机默认关闭文件日志，仅输出到控制台
+  level: "DEBUG"          # 开发阶段使用 DEBUG 获取详细输出
+  log_dir: ""
+  max_bytes: 10485760
+  backup_count: 3
+
+  # 算法实时性能监控（每隔 report_interval_sec 秒在日志/控制台输出一次汇报）
+  perf_monitor:
+    enabled: true             # false 则完全关闭，零开销
+    report_interval_sec: 5.0  # 开发测试时建议 5s 便于快速观察
+

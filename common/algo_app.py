@@ -6,7 +6,7 @@ import struct
 import threading
 import time
 
-from .config import load_app_config
+from .config import load_app_config, resolve_log_root
 from .protocol import (
     HEADER_FORMAT,
     HEADER_SIZE,
@@ -28,6 +28,62 @@ from .protocol import (
 )
 
 
+class RunLog:
+    """运行日志记录器（线程安全）。
+
+    日志路径: {log_root}/{algo_id}/algo_run.log
+      板卡: /hirain/hi_opt/algo_log/{algo_id}/algo_run.log
+      开发机: local_cache/logs/{algo_id}/algo_run.log
+
+    超过 MAX_ENTRIES 条时自动减半（保留后半段），写失败不影响算法主逻辑。
+    """
+
+    MAX_ENTRIES = 10000
+
+    def __init__(self, algo_id: int, enabled: bool = True):
+        self.enabled = enabled
+        self.lock = threading.Lock()
+        self.path = None
+        self.entries = 0
+        if not enabled:
+            return
+        try:
+            log_dir = os.path.join(resolve_log_root(), str(algo_id))
+            os.makedirs(log_dir, exist_ok=True)
+            self.path = os.path.join(log_dir, "algo_run.log")
+            if os.path.exists(self.path):
+                with open(self.path, "r", encoding="utf-8-sig", errors="ignore") as f:
+                    self.entries = sum(1 for _ in f)
+        except OSError:
+            self.path = None
+
+    def log(self, message: str) -> None:
+        """追加一条带时间戳的日志记录。"""
+        if not self.enabled or not self.path:
+            return
+        try:
+            with self.lock:
+                with open(self.path, "a", encoding="utf-8-sig") as f:
+                    f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {message}\n")
+                self.entries += 1
+                if self.entries > self.MAX_ENTRIES:
+                    self._trim()
+        except OSError:
+            pass
+
+    def _trim(self) -> None:
+        """超限后保留后半段，防止日志文件无限增长。"""
+        try:
+            with open(self.path, "r", encoding="utf-8-sig", errors="ignore") as f:
+                lines = f.readlines()
+            keep = lines[-(self.MAX_ENTRIES // 2):]
+            with open(self.path, "w", encoding="utf-8-sig") as f:
+                f.writelines(keep)
+            self.entries = len(keep)
+        except OSError:
+            pass
+
+
 class AlgoUdpAppBase:
     """UDP 算法服务公共基类。"""
 
@@ -40,9 +96,11 @@ class AlgoUdpAppBase:
         *,
         recv_timeout=SEND_INTERVAL_SECONDS,
         log_status=False,
+        log_enabled=True,
     ):
         algo_id, algo_version, _ = load_app_config(app_config_path, algo_id)
         self.log_status = log_status
+        self.run_log = RunLog(algo_id, enabled=log_enabled)
 
         self.stat_list = [algo_id, algo_version, os.getpid(), 0, STAT_NORMAL]
         self.running = True
@@ -162,6 +220,7 @@ class PhmBackgroundReporter(AlgoUdpAppBase):
         output_interval_ms=1000,
         log_status=True,
         log_output=False,
+        log_enabled=True,
         output_field_names=None,
     ):
         super().__init__(
@@ -170,12 +229,14 @@ class PhmBackgroundReporter(AlgoUdpAppBase):
             app_config_path,
             host_socket_addr,
             log_status=log_status,
+            log_enabled=log_enabled,
         )
         self.output_provider = output_provider
         self.output_interval_ms = output_interval_ms
         self.log_output = log_output
         self.output_field_names = output_field_names or []
         self._threads = []
+
 
     def send_algo_result_loop(self):
         while self.running:
