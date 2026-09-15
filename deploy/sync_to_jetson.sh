@@ -3,12 +3,12 @@
 # 受电弓监测系统 - Jetson AGX Orin 极速增量网络同步脚本
 # ==============================================================================
 # 默认优先尝试:
-# 1. 命令行指定的 IP (例如: ./deploy/sync_to_jetson.sh 172.10.1.188)
+# 1. 命令行指定的 IP (例如: ./deploy/sync_to_jetson.sh 172.10.1.5)
 # 2. 环境变量 JETSON_IP
-# 3. Jetson 原生 USB Type-C 虚拟网卡 IP (192.168.55.1，插线即连)
+# 3. 网线连接 IP (172.10.1.5) 或 Type-C 虚拟网卡 IP (192.168.55.1)
 # ==============================================================================
 
-JETSON_IP="${1:-${JETSON_IP:-192.168.55.1}}"
+JETSON_IP="${1:-${JETSON_IP:-172.10.1.5}}"
 JETSON_USER="${JETSON_USER:-hirain}"
 TARGET_DIR="${TARGET_DIR:-/home/hirain/Desktop/gongwang_clean}"
 LOCAL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/"

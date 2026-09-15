@@ -17,6 +17,7 @@ services:
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
+      - /usr/share/fonts:/usr/share/fonts:ro
       - /hirain/hi_opt/nvme1/Algo-result:/hirain/hi_opt/nvme1/Algo-result
       - /home/hirain/Desktop/gongwang_clean:/app
     logging:

@@ -352,15 +352,34 @@ class PantographFaultClassifier:
         cv2.rectangle(out, (10, 10), (530, 85), color, 2)
 
         # High-performance native Chinese text rendering
-        chinese_font_path = "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"
-        if not os.path.exists(chinese_font_path):
-            chinese_font_path = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
+        proj_fonts = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "fonts"))
+        candidate_fonts = [
+            os.path.join(proj_fonts, "simhei.ttf"),
+            os.path.join(proj_fonts, "wqy-zenhei.ttc"),
+            "/app/fonts/simhei.ttf",
+            "/app/fonts/wqy-zenhei.ttc",
+            "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+            "/home/hirain/.local/share/fonts/simhei.ttf",
+            os.path.expanduser("~/.local/share/fonts/simhei.ttf"),
+            os.path.expanduser("~/.local/share/fonts/msyh.ttc"),
+            os.path.expanduser("~/.local/share/fonts/wqy-zenhei.ttc"),
+            "C:/Windows/Fonts/msyh.ttc",
+            "C:/Windows/Fonts/simhei.ttf",
+        ]
+        chinese_font_path = next((f for f in candidate_fonts if os.path.exists(f)), None)
 
         from PIL import Image, ImageDraw, ImageFont
 
         try:
-            pil_font_title = ImageFont.truetype(chinese_font_path, 22)
-            pil_font_sub = ImageFont.truetype(chinese_font_path, 16)
+            if chinese_font_path:
+                pil_font_title = ImageFont.truetype(chinese_font_path, 22)
+                pil_font_sub = ImageFont.truetype(chinese_font_path, 16)
+            else:
+                pil_font_title = ImageFont.load_default()
+                pil_font_sub = ImageFont.load_default()
         except Exception:
             pil_font_title = ImageFont.load_default()
             pil_font_sub = ImageFont.load_default()

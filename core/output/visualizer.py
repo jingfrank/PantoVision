@@ -21,11 +21,14 @@ Output Layer: Industrial Visualizer.
 import os
 import cv2
 import time
+import logging
 import datetime
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from typing import Optional, Dict, Any, List, Tuple
 from core.data_types import FusionResult, FramePacket, DetectionResult
+
+logger = logging.getLogger("visualizer")
 
 
 # ---------------------------------------------------------------------------
@@ -51,10 +54,20 @@ def draw_osd_watermark(
         draw = ImageDraw.Draw(img_pil)
 
         if not font_path:
+            proj_fonts = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "fonts"))
             candidate_fonts = [
+                os.path.join(proj_fonts, "simhei.ttf"),
+                os.path.join(proj_fonts, "wqy-zenhei.ttc"),
+                "/app/fonts/simhei.ttf",
+                "/app/fonts/wqy-zenhei.ttc",
                 "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+                "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
                 "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
                 "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+                "/home/hirain/.local/share/fonts/simhei.ttf",
+                os.path.expanduser("~/.local/share/fonts/simhei.ttf"),
+                os.path.expanduser("~/.local/share/fonts/msyh.ttc"),
+                os.path.expanduser("~/.local/share/fonts/wqy-zenhei.ttc"),
                 "C:/Windows/Fonts/msyh.ttc",
                 "C:/Windows/Fonts/simhei.ttf",
             ]
@@ -139,14 +152,28 @@ class Visualizer:
 
     def __init__(self):
         # 探测系统中文字体
+        proj_fonts = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "fonts"))
         candidate_fonts = [
+            os.path.join(proj_fonts, "simhei.ttf"),
+            os.path.join(proj_fonts, "wqy-zenhei.ttc"),
+            "/app/fonts/simhei.ttf",
+            "/app/fonts/wqy-zenhei.ttc",
             "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
             "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
             "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+            "/home/hirain/.local/share/fonts/simhei.ttf",
+            os.path.expanduser("~/.local/share/fonts/simhei.ttf"),
+            os.path.expanduser("~/.local/share/fonts/msyh.ttc"),
+            os.path.expanduser("~/.local/share/fonts/wqy-zenhei.ttc"),
             "C:/Windows/Fonts/msyh.ttc",
             "C:/Windows/Fonts/simhei.ttf",
         ]
         self.font_path = next((f for f in candidate_fonts if os.path.exists(f)), None)
+        if self.font_path:
+            logger.info(f"[Visualizer] 成功挂载中文字体: {self.font_path}")
+        else:
+            logger.warning("[Visualizer] ⚠️ 未探测到有效中文字体文件，文字可能退化为方块乱码！")
 
     # ------------------------------------------------------------------
     # 公开接口
