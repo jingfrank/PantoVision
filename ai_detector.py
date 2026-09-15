@@ -30,7 +30,7 @@ from core.data_types import FramePacket, FusionResult
 from core.scheduler import DetectionScheduler
 from core.fusion import FusionEngine, FAULT_NAME_MAP
 from core.ingestion import RTSPStreamReader, VideoFileReader, RingFrameBuffer
-from core.output import UDPAlarmSender, StorageManager, Visualizer
+from core.output import UDPAlarmSender, StorageManager, Visualizer, draw_osd_watermark
 
 logger = logging.getLogger("ai_detector")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
