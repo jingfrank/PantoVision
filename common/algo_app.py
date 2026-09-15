@@ -49,6 +49,12 @@ class AlgoUdpAppBase:
         self.result_sequence = 0
 
         self.local_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.local_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if hasattr(socket, "SO_REUSEPORT"):
+            try:
+                self.local_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+            except Exception:
+                pass
         self.local_socket.bind(("0.0.0.0", algo_port))
         self.local_socket.settimeout(recv_timeout)
         self.stat_list[3] = self.local_socket.getsockname()[1]

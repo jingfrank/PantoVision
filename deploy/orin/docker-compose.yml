@@ -2,12 +2,12 @@ version: '3.8'
 
 services:
   gongwang_monitor:
-    image: pantograph-subsystem-jetson:v2.0
+    image: ghcr.io/nvidia-ai-iot/vllm:latest-jetson-orin 
     working_dir: /app
-    container_name: gongwang_monitor
+    container_name: gongwang_clean
     restart: always
-    command: python3 main.py config/config_prod.yaml
     runtime: nvidia
+    command: sleep infinity 
     network_mode: "host"
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
@@ -17,8 +17,8 @@ services:
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
-      - /hirain/hi_opt/algo/gongwang_monitor:/app
-      - /hirain/hi_opt/nvme1/Algo-result:/app/local_cache/Algo-result
+      - /hirain/hi_opt/nvme1/Algo-result:/hirain/hi_opt/nvme1/Algo-result
+      - /home/hirain/Desktop/gongwang_clean:/app
     logging:
       driver: "json-file"
       options:

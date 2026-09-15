@@ -8,7 +8,7 @@ hardware_config:
 
 video_stream_config:
   streams:
-    - rtsp_url: "rtsp://192.168.106.200/live/test"
+    - rtsp_url: "rtsp://172.10.1.126/live/test"
       camera_id: 0
       car_number: 6
       result_base_dir: "/hirain/hi_opt/nvme1/Algo-result"

@@ -73,6 +73,10 @@ class PantographFaultDetector:
         self.camera_id = stream_cfg.get("camera_id", self.hw_cfg.get("camera_id", 0))
         self.car_number = stream_cfg.get("car_number", self.hw_cfg.get("car_number", 6))
         self.result_base_dir = stream_cfg.get("result_base_dir", "./local_cache/Algo-result")
+        self.ftp_remote_dir = stream_cfg.get(
+            "ftp_remote_dir",
+            global_cfg.get("ftp_config", {}).get("monitor_remote_dir", "nvme1/Algo-result")
+        )
         self.train_id = global_cfg.get("train_id", "CR400BF")
 
         # 1. 初始化检测调度层 (配置驱动 + 注册表自动装配 + 失败隔离)
@@ -123,6 +127,38 @@ class PantographFaultDetector:
     @property
     def float_alarmed(self) -> bool:
         return "abnormal_float" in self._current_active_fault_types
+
+    def _ftp_upload_local_file(self, local_path: str) -> None:
+        """异步将抓拍图片或完整视频上传到 NAS，并按策略清理"""
+        try:
+            from ftp_uploader import get_ftp_uploader
+
+            uploader = get_ftp_uploader()
+            if (
+                not uploader
+                or not uploader.enabled
+                or not local_path
+                or not os.path.exists(local_path)
+            ):
+                return
+
+            try:
+                rel = os.path.relpath(local_path, self.result_base_dir).replace("\\", "/")
+            except ValueError:
+                rel = os.path.basename(local_path)
+
+            remote_path = f"{self.ftp_remote_dir.rstrip('/')}/{rel}"
+            logger.info(f"[AI-FTP] 启动后台异步上传至 NAS: {local_path} -> {remote_path}")
+
+            # 后台线程异步上传，避免阻塞视频流主循环
+            threading.Thread(
+                target=uploader.upload_and_delete,
+                args=(local_path, remote_path),
+                daemon=True,
+                name=f"FTP-Upload-{os.path.basename(local_path)}"
+            ).start()
+        except Exception as e:
+            logger.error(f"[AI-FTP] 触发 FTP 上传异常: {e}")
 
     def _create_stream_source(self):
         """根据配置自动适配 RTSP 实时网络流或本地测试视频文件"""
@@ -183,12 +219,13 @@ class PantographFaultDetector:
                         fault_code = FAULT_CODE_MAP.get(f_type, 0)
                         cfg_level = self.alarm_cfg.get("fault_levels", {}).get(chinese_name, 1)
 
-                        # (a) 保存故障时刻高质量抓拍
+                        # (a) 保存故障时刻高质量抓拍并异步上传 NAS
                         pic_path = self.storage.save_snapshot(
                             frame=hud_frame if hud_frame is not None else packet.frame,
                             timestamp=packet.timestamp,
                             fault_code=fault_code
                         )
+                        self._ftp_upload_local_file(pic_path)
 
                         # (b) 发射 0xFF 0x20 车端标准二进制报文
                         self.udp_sender.send_alarm(
@@ -212,11 +249,14 @@ class PantographFaultDetector:
 
                 self._last_active_fault_types = set(self._current_active_fault_types)
 
-                # 5. 环形缓冲：收集后60秒帧与定期合成完整视频
+                # 5. 环形缓冲：收集后60秒帧与定期合成完整视频并上传
                 cache_frame = hud_frame if hud_frame is not None else packet.frame
                 self.ring_buffer.append(packet.timestamp, cache_frame)
                 self.ring_buffer.collect_post_frame(packet.timestamp, cache_frame)
-                self.ring_buffer.finalize_recordings(packet.timestamp)
+                completed_videos = self.ring_buffer.finalize_recordings(packet.timestamp)
+                if completed_videos:
+                    for vid_path in completed_videos:
+                        self._ftp_upload_local_file(vid_path)
 
         except Exception as e:
             logger.error(f"[AI-CAR{self.car_number}-CAM{self.camera_id}] 主循环异常: {e}", exc_info=True)

@@ -1,11 +1,12 @@
-# ==============================================================================
+
 # 受电弓网故障监测系统 - Jetson AGX Orin 边缘部署 Dockerfile (v2.0)
 # 基于 dustynv/transformers:nvgpt-r35.3.1 官方 Jetson 大模型生态镜像构建
 # ==============================================================================
 
-FROM dustynv/transformers:nvgpt-r35.3.1
+# ==============================================================================
+FROM ghcr.io/nvidia-ai-iot/vllm:latest-jetson-orin
 
-
+# ==============================================================================
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=Asia/Shanghai
 ENV PYTHONUNBUFFERED=1
@@ -36,7 +37,6 @@ RUN pip3 install --no-cache-dir \
 WORKDIR /app
 COPY . /app
 
-CMD ["python3", "main.py", "config/config_prod.yaml"]
 
 
 
