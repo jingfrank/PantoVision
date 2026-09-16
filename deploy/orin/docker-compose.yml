@@ -2,22 +2,25 @@ version: '3.8'
 
 services:
   gongwang_monitor:
-    image: ghcr.io/nvidia-ai-iot/vllm:latest-jetson-orin 
+    image: gongwang_clean:v1             # 1. 替换为你 commit 保存的镜像
     working_dir: /app
     container_name: gongwang_clean
     restart: always
     runtime: nvidia
-    command: sleep infinity 
+    ipc: host                            # 2. 关键：解除 64MB 共享内存限制，供 vLLM/PyTorch 使用
+    privileged: true                     # 3. 关键：放开底层硬件操作权限
+    command: sleep infinity
     network_mode: "host"
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
-      - NVIDIA_DRIVER_CAPABILITIES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all   # 关键：强制宿主机注入视频编解码库
       - TZ=Asia/Shanghai
       - PYTHONUNBUFFERED=1
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
       - /usr/share/fonts:/usr/share/fonts:ro
+      - /dev:/dev                        # 4. 关键：映射底层所有 NVENC 节点
       - /hirain/hi_opt/nvme1/Algo-result:/hirain/hi_opt/nvme1/Algo-result
       - /home/hirain/Desktop/gongwang_clean:/app
     logging:
@@ -25,4 +28,3 @@ services:
       options:
         max-size: "100m"
         max-file: "3"
-
