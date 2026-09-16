@@ -223,6 +223,114 @@ class RingFrameBuffer:
             finally:
                 self._synthesis_queue.task_done()
 
+    def _create_video_writer(
+        self,
+        tmp_video_path: str,
+        effective_fps: float,
+        w: int,
+        h: int
+    ) -> Tuple[Optional[cv2.VideoWriter], str]:
+        """
+        多级自适应编码器创建：
+        1. Jetson NVENC 硬件硬编 (GStreamer + nvv4l2h264enc + NVMM)
+        2. Jetson NVENC 硬件硬编备用管线 (GStreamer + nvv4l2h264enc + I420)
+        3. GStreamer 极速软编 (x264enc)
+        4. FFmpeg 标准 H.264 (avc1)
+        5. 通用 MP4V 软编兜底 (mp4v，100% 保证成功可用)
+        """
+        escaped_path = tmp_video_path.replace('"', '\\"')
+
+        candidates = [
+            (
+                "Jetson-nvv4l2h264enc(NVMM)",
+                lambda: cv2.VideoWriter(
+                    (
+                        f"appsrc ! "
+                        f"video/x-raw, format=BGR ! "
+                        f"queue ! "
+                        f"videoconvert ! "
+                        f"video/x-raw, format=BGRx ! "
+                        f"nvvidconv ! "
+                        f"video/x-raw(memory:NVMM) ! "
+                        f"nvv4l2h264enc bitrate=4000000 insert-sps-pps=true ! "
+                        f"h264parse ! "
+                        f"qtmux ! "
+                        f"filesink location=\"{escaped_path}\""
+                    ),
+                    cv2.CAP_GSTREAMER,
+                    0,
+                    effective_fps,
+                    (w, h)
+                )
+            ),
+            (
+                "Jetson-nvv4l2h264enc(I420)",
+                lambda: cv2.VideoWriter(
+                    (
+                        f"appsrc ! "
+                        f"video/x-raw, format=BGR ! "
+                        f"videoconvert ! "
+                        f"video/x-raw, format=I420 ! "
+                        f"nvv4l2h264enc bitrate=4000000 insert-sps-pps=true ! "
+                        f"h264parse ! "
+                        f"qtmux ! "
+                        f"filesink location=\"{escaped_path}\""
+                    ),
+                    cv2.CAP_GSTREAMER,
+                    0,
+                    effective_fps,
+                    (w, h)
+                )
+            ),
+            (
+                "GStreamer-x264enc",
+                lambda: cv2.VideoWriter(
+                    (
+                        f"appsrc ! "
+                        f"video/x-raw, format=BGR ! "
+                        f"videoconvert ! "
+                        f"x264enc speed-preset=ultrafast tune=zerolatency ! "
+                        f"h264parse ! "
+                        f"qtmux ! "
+                        f"filesink location=\"{escaped_path}\""
+                    ),
+                    cv2.CAP_GSTREAMER,
+                    0,
+                    effective_fps,
+                    (w, h)
+                )
+            ),
+            (
+                "FFmpeg-avc1",
+                lambda: cv2.VideoWriter(
+                    tmp_video_path,
+                    cv2.VideoWriter_fourcc(*"avc1"),
+                    effective_fps,
+                    (w, h)
+                )
+            ),
+            (
+                "FFmpeg-mp4v",
+                lambda: cv2.VideoWriter(
+                    tmp_video_path,
+                    cv2.VideoWriter_fourcc(*"mp4v"),
+                    effective_fps,
+                    (w, h)
+                )
+            )
+        ]
+
+        for name, factory in candidates:
+            try:
+                writer = factory()
+                if writer is not None and writer.isOpened():
+                    logger.info(f"[RingBuffer] 成功启用编码器: [{name}] -> {tmp_video_path}")
+                    return writer, name
+            except Exception as e:
+                logger.debug(f"[RingBuffer] 尝试编码器 [{name}] 失败: {e}")
+
+        return None, "none"
+
     def _synthesize_single_video(self, job: Dict[str, Any]) -> Optional[str]:
         """
         单次视频合成核心方法：
@@ -255,19 +363,13 @@ class RingFrameBuffer:
         total_span = max(1.0, end_ts - start_ts)
         effective_fps = float(max(1.0, min(60.0, len(all_jpegs) / total_span)))
 
-        # 优先采用车规标准 H.264 (avc1) 编码，若失败回退至 mp4v
-        writer = None
+        # 多级自适应选择编码器 (优先 Jetson nvv4l2h264enc 硬件编码，优雅回退)
+        writer, encoder_name = self._create_video_writer(tmp_video_path, effective_fps, w, h)
+        if writer is None or not writer.isOpened():
+            raise RuntimeError(f"无法初始化任何视频编码器 (nvv4l2h264enc / avc1 / mp4v) 写入 {tmp_video_path}")
+
         t0 = time.perf_counter()
         try:
-            fourcc = cv2.VideoWriter_fourcc(*"avc1")
-            writer = cv2.VideoWriter(tmp_video_path, fourcc, effective_fps, (w, h))
-            if not writer.isOpened():
-                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-                writer = cv2.VideoWriter(tmp_video_path, fourcc, effective_fps, (w, h))
-
-            if not writer.isOpened():
-                raise RuntimeError(f"无法初始化任何视频编码器 (avc1 / mp4v) 写入 {tmp_video_path}")
-
             for j_bytes in all_jpegs:
                 img = cv2.imdecode(np.frombuffer(j_bytes, np.uint8), cv2.IMREAD_COLOR)
                 if img is not None:
@@ -282,7 +384,7 @@ class RingFrameBuffer:
             elapsed = (time.perf_counter() - t0) * 1000.0
             logger.info(
                 f"[RingBuffer] 完整前后视频后台异步合成落盘: {final_video_path} "
-                f"({len(all_jpegs)}帧, {effective_fps:.1f} FPS, 耗时 {elapsed:.1f}ms)"
+                f"({len(all_jpegs)}帧, {effective_fps:.1f} FPS, 编码器 [{encoder_name}], 耗时 {elapsed:.1f}ms)"
             )
             return final_video_path
 
