@@ -235,8 +235,10 @@ class RingFrameBuffer:
         1. Jetson NVENC 硬件硬编 (GStreamer + nvv4l2h264enc + NVMM)
         2. Jetson NVENC 硬件硬编备用管线 (GStreamer + nvv4l2h264enc + I420)
         3. GStreamer 极速软编 (x264enc)
-        4. FFmpeg 标准 H.264 (avc1)
-        5. 通用 MP4V 软编兜底 (mp4v，100% 保证成功可用)
+        4. 通用 MP4V 软编兜底 (mp4v，100% 保证成功可用)
+
+        注：已移除 FFmpeg-avc1，该 fourcc 在 Jetson ARM 上会触发 FFmpeg 尝试
+        h264_v4l2m2m 编码器，因 V4L2 设备访问失败产生 errno -22 的 ERROR 日志干扰。
         """
         escaped_path = tmp_video_path.replace('"', '\\"')
 
@@ -251,11 +253,11 @@ class RingFrameBuffer:
                         f"videoconvert ! "
                         f"video/x-raw, format=BGRx ! "
                         f"nvvidconv ! "
-                        f"video/x-raw(memory:NVMM) ! "
-                        f"nvv4l2h264enc bitrate=4000000 insert-sps-pps=true ! "
+                        f"video/x-raw(memory:NVMM), format=NV12 ! "
+                        f"nvv4l2h264enc bitrate=4000000 ! "
                         f"h264parse ! "
-                        f"qtmux ! "
-                        f"filesink location=\"{escaped_path}\""
+                        f"mp4mux ! "
+                        f"filesink location=\"{escaped_path}\" sync=false"
                     ),
                     cv2.CAP_GSTREAMER,
                     0,
@@ -271,10 +273,10 @@ class RingFrameBuffer:
                         f"video/x-raw, format=BGR ! "
                         f"videoconvert ! "
                         f"video/x-raw, format=I420 ! "
-                        f"nvv4l2h264enc bitrate=4000000 insert-sps-pps=true ! "
+                        f"nvv4l2h264enc bitrate=4000000 ! "
                         f"h264parse ! "
-                        f"qtmux ! "
-                        f"filesink location=\"{escaped_path}\""
+                        f"mp4mux ! "
+                        f"filesink location=\"{escaped_path}\" sync=false"
                     ),
                     cv2.CAP_GSTREAMER,
                     0,
@@ -301,15 +303,6 @@ class RingFrameBuffer:
                 )
             ),
             (
-                "FFmpeg-avc1",
-                lambda: cv2.VideoWriter(
-                    tmp_video_path,
-                    cv2.VideoWriter_fourcc(*"avc1"),
-                    effective_fps,
-                    (w, h)
-                )
-            ),
-            (
                 "FFmpeg-mp4v",
                 lambda: cv2.VideoWriter(
                     tmp_video_path,
@@ -326,8 +319,14 @@ class RingFrameBuffer:
                 if writer is not None and writer.isOpened():
                     logger.info(f"[RingBuffer] 成功启用编码器: [{name}] -> {tmp_video_path}")
                     return writer, name
+                if writer is not None:
+                    try:
+                        writer.release()
+                    except Exception:
+                        pass
+                logger.warning(f"[RingBuffer] 编码器 [{name}] 初始化失败 (isOpened=False)，尝试下一级...")
             except Exception as e:
-                logger.debug(f"[RingBuffer] 尝试编码器 [{name}] 失败: {e}")
+                logger.warning(f"[RingBuffer] 尝试编码器 [{name}] 异常: {e}，尝试下一级...")
 
         return None, "none"
 
@@ -335,7 +334,7 @@ class RingFrameBuffer:
         """
         单次视频合成核心方法：
         - 安全只读 np.frombuffer 解码
-        - 优先 avc1 硬件编码，失败优雅回退 mp4v
+        - 优先 GStreamer nvv4l2h264enc 硬件编码，失败优雅回退 mp4v
         - 原子落盘机制 (.tmp.mp4 -> .mp4)
         """
         base_name = job["base_name"]
@@ -366,7 +365,7 @@ class RingFrameBuffer:
         # 多级自适应选择编码器 (优先 Jetson nvv4l2h264enc 硬件编码，优雅回退)
         writer, encoder_name = self._create_video_writer(tmp_video_path, effective_fps, w, h)
         if writer is None or not writer.isOpened():
-            raise RuntimeError(f"无法初始化任何视频编码器 (nvv4l2h264enc / avc1 / mp4v) 写入 {tmp_video_path}")
+            raise RuntimeError(f"无法初始化任何视频编码器 (nvv4l2h264enc / x264enc / mp4v) 写入 {tmp_video_path}")
 
         t0 = time.perf_counter()
         try:
@@ -377,6 +376,45 @@ class RingFrameBuffer:
 
             writer.release()
             writer = None
+
+            # ── 落盘完整性验证（防 NVENC 静默失败）──────────────────────
+            # nvv4l2h264enc 在 NVENC 资源竞争/上下文初始化失败时，
+            # isOpened()=True 但 write() 全部静默丢帧，最终生成 0 字节文件。
+            # 必须在 os.replace() 前拦截，否则空文件会被原子重命名为最终 .mp4，
+            # 导致故障录像静默丢失且无任何 ERROR 日志。
+            tmp_size = os.path.getsize(tmp_video_path) if os.path.exists(tmp_video_path) else 0
+            if tmp_size < 1024 and encoder_name != "FFmpeg-mp4v":
+                logger.warning(
+                    f"[RingBuffer] 编码器 [{encoder_name}] 输出文件异常 "
+                    f"(size={tmp_size}B)，推测 NVENC 上下文初始化失败，"
+                    f"触发 FFmpeg-mp4v 紧急重编..."
+                )
+                if os.path.exists(tmp_video_path):
+                    os.remove(tmp_video_path)
+                writer_fb = cv2.VideoWriter(
+                    tmp_video_path,
+                    cv2.VideoWriter_fourcc(*"mp4v"),
+                    effective_fps,
+                    (w, h)
+                )
+                if writer_fb and writer_fb.isOpened():
+                    for j_bytes in all_jpegs:
+                        img_fb = cv2.imdecode(
+                            np.frombuffer(j_bytes, np.uint8), cv2.IMREAD_COLOR
+                        )
+                        if img_fb is not None:
+                            writer_fb.write(img_fb)
+                    writer_fb.release()
+                    encoder_name = "FFmpeg-mp4v(emergency-fallback)"
+                    logger.info(
+                        f"[RingBuffer] mp4v 紧急重编成功，"
+                        f"size={os.path.getsize(tmp_video_path)}B"
+                    )
+                else:
+                    raise RuntimeError(
+                        f"mp4v 紧急回退初始化失败，无法生成视频: {tmp_video_path}"
+                    )
+            # ─────────────────────────────────────────────────────────────
 
             # 原子重命名，确保文件在最终暴露给外部时必定 100% 完整可用
             os.replace(tmp_video_path, final_video_path)
