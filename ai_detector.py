@@ -30,7 +30,7 @@ from core.data_types import FramePacket, FusionResult
 from core.scheduler import DetectionScheduler
 from core.fusion import FusionEngine, FAULT_NAME_MAP
 from core.ingestion import RTSPStreamReader, VideoFileReader, RingFrameBuffer
-from core.output import UDPAlarmSender, StorageManager, Visualizer, draw_osd_watermark
+from core.output import UDPAlarmSender, StorageManager, Visualizer, draw_osd_watermark, AsyncNasUploader
 from core.perf_monitor import PerformanceMonitor
 
 logger = logging.getLogger("ai_detector")
@@ -92,11 +92,24 @@ class PantographFaultDetector:
         # 2. 初始化结果融合层
         self.fusion = FusionEngine()
 
-        # 3. 初始化环形缓冲层 (前后 60 秒)
-        fps = float(self.vs_cfg.get("fps", 25.0))
-        self.ring_buffer = RingFrameBuffer(fps=fps, pre_record_sec=60, post_record_sec=60)
+        # 3. 初始化异步 NAS 上传流水线 (Stage 2: 独立上传 Worker + 任务队列)
+        self.async_uploader = AsyncNasUploader(
+            max_queue_size=20,
+            worker_name=f"NasUploadWorker-CAR{self.car_number}-CAM{self.camera_id}"
+        )
 
-        # 4. 初始化输出层组件
+        # 4. 初始化环形缓冲与异步视频合成流水线 (Stage 1: 独立合成 Worker + 背压保护)
+        fps = float(self.vs_cfg.get("fps", 25.0))
+        self.ring_buffer = RingFrameBuffer(
+            fps=fps,
+            pre_record_sec=60,
+            post_record_sec=60,
+            max_synthesis_queue=5,
+            on_video_completed=self._ftp_upload_local_file,
+            worker_name=f"RingBuffer-Synth-CAR{self.car_number}-CAM{self.camera_id}"
+        )
+
+        # 5. 初始化输出层组件
         udp_ip = self.alarm_cfg.get("udp_ip", "127.0.0.1")
         udp_port = int(self.alarm_cfg.get("udp_port", 8080))
         self.udp_sender = UDPAlarmSender(udp_ip=udp_ip, udp_port=udp_port)
@@ -166,17 +179,12 @@ class PantographFaultDetector:
                 rel = os.path.basename(local_path)
 
             remote_path = f"{self.ftp_remote_dir.rstrip('/')}/{rel}"
-            logger.info(f"[AI-FTP] 启动后台异步上传至 NAS: {local_path} -> {remote_path}")
-
-            # 后台线程异步上传，避免阻塞视频流主循环
-            threading.Thread(
-                target=uploader.upload_and_delete,
-                args=(local_path, remote_path),
-                daemon=True,
-                name=f"FTP-Upload-{os.path.basename(local_path)}"
-            ).start()
+            # 投递至 Stage 2 异步上传流水线 (带背压与重试，解耦网络 I/O)
+            submitted = self.async_uploader.submit(local_path, remote_path)
+            if submitted:
+                logger.info(f"[AI-FTP] 任务已提交上传流水线: {local_path} -> {remote_path}")
         except Exception as e:
-            logger.error(f"[AI-FTP] 触发 FTP 上传异常: {e}")
+            logger.error(f"[AI-FTP] 提交上传流水线异常: {e}")
 
     def _create_stream_source(self):
         """根据配置自动适配 RTSP 实时网络流或本地测试视频文件"""
@@ -297,5 +305,7 @@ class PantographFaultDetector:
             logger.error(f"[AI-CAR{self.car_number}-CAM{self.camera_id}] 主循环异常: {e}", exc_info=True)
         finally:
             stream_source.stop()
+            self.ring_buffer.stop()
+            self.async_uploader.stop()
             self.udp_sender.close()
             logger.info(f"[AI-CAR{self.car_number}-CAM{self.camera_id}] 检测服务已安全停止")
