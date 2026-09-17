@@ -61,7 +61,39 @@ class DetectionScheduler:
             except Exception as e:
                 logger.error(f"[Scheduler] 挂载检测器插件 [{name}]({plugin_type}) 失败: {e}", exc_info=True)
 
+        self._assign_staggered_phases()
         logger.info(f"[Scheduler] 检测调度层初始化完毕，共挂载 {len(self.detectors)} 个插件")
+
+    def _assign_staggered_phases(self) -> None:
+        """
+        为同周期 interval 模式检测器自动分配均匀相位偏移。
+        按 sample_interval_sec 分组，组内均匀分配触发时间槽。
+        若 detector 已经在 schedule 中显式指定了 phase_offset_sec，则予以保留。
+        """
+        from collections import defaultdict
+
+        interval_groups: Dict[float, List[BaseDetector]] = defaultdict(list)
+        for det in self.detectors:
+            sched = getattr(det, "schedule_cfg", {})
+            if sched.get("mode") == "interval":
+                sec = float(sched.get("sample_interval_sec", 1.0))
+                interval_groups[sec].append(det)
+
+        for sec_interval, group in interval_groups.items():
+            if len(group) <= 1:
+                continue
+
+            slot_width = sec_interval / len(group)
+            for idx, det in enumerate(group):
+                sched = det.schedule_cfg
+                if "phase_offset_sec" not in sched:
+                    sched["phase_offset_sec"] = round(idx * slot_width, 4)
+
+                offset = sched["phase_offset_sec"]
+                logger.info(
+                    f"[Scheduler-Stagger] 插件 [{det.name}] "
+                    f"错峰相位: +{offset:.3f}s / {sec_interval:.1f}s 周期"
+                )
 
     def set_enabled(self, name: str, enabled: bool) -> bool:
         """现场动态启停控制接口"""
@@ -85,10 +117,16 @@ class DetectionScheduler:
 
         elif mode == "interval":
             sec_interval = float(sched.get("sample_interval_sec", 1.0))
+            phase_offset = float(sched.get("phase_offset_sec", 0.0))
             last_t = self.last_run_time.get(name, -999.0)
-            # 使用精确的 >= sec_interval 判断，允许半帧（~0.02s@25fps）浮点容差，
-            # 避免 *0.95 导致每秒提前 1 帧（0.04s）的累积时序漂移。
-            half_frame_tol = sec_interval * 0.02   # ≈ 0.5 帧 @25fps，仅补偿浮点误差
+
+            if last_t < 0:
+                # 首次运行：根据相位偏移决定首次触发时间
+                phase_in_cycle = packet.timestamp % sec_interval
+                half_frame_tol = sec_interval * 0.02
+                return phase_in_cycle >= (phase_offset - half_frame_tol)
+
+            half_frame_tol = sec_interval * 0.02
             return (packet.timestamp - last_t) >= (sec_interval - half_frame_tol)
 
         return True
@@ -128,12 +166,17 @@ class DetectionScheduler:
                 sched = getattr(detector, "schedule_cfg", {})
                 if sched.get("mode") == "interval":
                     sec_interval = float(sched.get("sample_interval_sec", 1.0))
-                    prev_t = self.last_run_time.get(name, packet.timestamp)
-                    elapsed = packet.timestamp - prev_t
-                    # 向下取整到整数个 interval
-                    n_intervals = max(1, int(elapsed / sec_interval))
-                    aligned_t = prev_t + n_intervals * sec_interval
-                    self.last_run_time[name] = aligned_t
+                    phase_offset = float(sched.get("phase_offset_sec", 0.0))
+                    prev_t = self.last_run_time.get(name, -999.0)
+
+                    if prev_t < 0:
+                        cycle_base = packet.timestamp - (packet.timestamp % sec_interval)
+                        self.last_run_time[name] = cycle_base + phase_offset
+                    else:
+                        elapsed = packet.timestamp - prev_t
+                        n_intervals = max(1, int(elapsed / sec_interval))
+                        aligned_t = prev_t + n_intervals * sec_interval
+                        self.last_run_time[name] = aligned_t
                 else:
                     self.last_run_time[name] = packet.timestamp
 

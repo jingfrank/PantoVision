@@ -33,6 +33,7 @@ detectors:
     schedule:
       mode: "interval" # 1Hz 采样周期运行 (秒级累积)
       sample_interval_sec: 1.0
+      phase_offset_sec: 0.0 # FastAD 组：同相位触发以共享推理
     params:
       model_path: "models/fastad_layer2_256_reg1e4_nq3_fmq1.pt"
       grid_size: 64
@@ -50,6 +51,7 @@ detectors:
     schedule:
       mode: "interval" # 1Hz 采样运行 (秒级机械形变)
       sample_interval_sec: 1.0
+      phase_offset_sec: 0.5 # HRNet：错峰 0.5s，避免与 FastAD 组撞车
     params:
       weights_path: "models/best_hrnet_w32_panto.pth"
       width: 32
@@ -84,6 +86,7 @@ detectors:
     schedule:
       mode: "interval"
       sample_interval_sec: 1.0
+      phase_offset_sec: 0.0 # FastAD 组：同相位
     params:
       model_path: "models/fastad_layer2_256_reg1e4_nq3_fmq1.pt"
       min_defect_area: 250
@@ -98,6 +101,7 @@ detectors:
     schedule:
       mode: "interval"
       sample_interval_sec: 1.0
+      phase_offset_sec: 0.0 # FastAD 组：同相位
     params:
       model_path: "models/fastad_layer2_256_reg1e4_nq3_fmq1.pt"
       catenary_roi_ratio: [0.25, 0.25, 0.85, 0.50]
