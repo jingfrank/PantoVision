@@ -97,10 +97,14 @@ class AlgoUdpAppBase:
         recv_timeout=SEND_INTERVAL_SECONDS,
         log_status=False,
         log_enabled=True,
+        shared_cfg=None,
     ):
         algo_id, algo_version, _ = load_app_config(app_config_path, algo_id)
         self.log_status = log_status
         self.run_log = RunLog(algo_id, enabled=log_enabled)
+        self.shared_cfg = shared_cfg if shared_cfg is not None else {}
+        if "input_parameters" not in self.shared_cfg:
+            self.shared_cfg["input_parameters"] = {}
 
         self.stat_list = [algo_id, algo_version, os.getpid(), 0, STAT_NORMAL]
         self.running = True
@@ -188,19 +192,41 @@ class AlgoUdpAppBase:
         os._exit(0)
 
     def recv_command_loop(self):
+        from .protocol import FIELD_HEADER_FORMAT, FIELD_HEADER_SIZE, decode_field_value
+
         while self.running:
             try:
                 recv_data, _ = self.local_socket.recvfrom(RECV_BUFFER_SIZE)
             except socket.timeout:
                 continue
+            except OSError:
+                break
 
             if len(recv_data) < HEADER_SIZE:
                 continue
 
             header_data = struct.unpack(HEADER_FORMAT, recv_data[:HEADER_SIZE])
             command = header_data[2]
+            data_length = header_data[4]
 
             if command == PROG_ALGO_DATA:
+                payload = recv_data[HEADER_SIZE : HEADER_SIZE + data_length]
+                offset = 0
+                while offset + FIELD_HEADER_SIZE <= len(payload):
+                    field_idx, field_len = struct.unpack(
+                        FIELD_HEADER_FORMAT, payload[offset : offset + FIELD_HEADER_SIZE]
+                    )
+                    offset += FIELD_HEADER_SIZE
+                    if offset + field_len > len(payload):
+                        break
+                    field_bytes = payload[offset : offset + field_len]
+                    try:
+                        four_byte_format = "<f" if field_idx in (0, 1, 2) and field_len == 4 else "<I"
+                        val = decode_field_value(field_len, field_bytes, four_byte_format=four_byte_format)
+                        self.shared_cfg["input_parameters"][field_idx] = val
+                    except Exception:
+                        pass
+                    offset += field_len
                 continue
             if command == PROG_ALGO_STOP:
                 self._self_stop()
@@ -222,6 +248,7 @@ class PhmBackgroundReporter(AlgoUdpAppBase):
         log_output=False,
         log_enabled=True,
         output_field_names=None,
+        shared_cfg=None,
     ):
         super().__init__(
             algo_id,
@@ -230,6 +257,7 @@ class PhmBackgroundReporter(AlgoUdpAppBase):
             host_socket_addr,
             log_status=log_status,
             log_enabled=log_enabled,
+            shared_cfg=shared_cfg,
         )
         self.output_provider = output_provider
         self.output_interval_ms = output_interval_ms

@@ -39,6 +39,7 @@ class FramePacket:
     is_panto_raised: bool = True  # TCMS 升降弓状态
     speed: float = 0.0            # 车速 (km/h)
     train_id: str = "CR400BF"     # 车次标识
+    kilometer_post: Optional[int] = None  # 公里标 (米, 0xFFFFFFFF 为未知)
 
 
 @dataclass

@@ -89,6 +89,8 @@ def _load_excel_app_config(app_config_path, algo_id):
     for row in config_df.iloc[:, 3].tolist():
         if isinstance(row, int):
             values.append(row)
+        elif isinstance(row, float) and row.is_integer():
+            values.append(int(row))
     max_input_index = max(values) if values else 0
     return algo_id, algo_version, max_input_index
 
@@ -102,3 +104,26 @@ def load_app_config(app_config_path, algo_id):
     if ext in (".yaml", ".yml"):
         return _load_yaml_app_config(app_config_path, algo_id)
     return _load_excel_app_config(app_config_path, algo_id)
+
+
+def load_input_variables_from_app_config(app_config_path):
+    """读取 AppConfig.xlsx 中的输入变量定义列表，返回字典映射 {index: {'name': name, 'type': type}}"""
+    if not os.path.exists(app_config_path):
+        return {}
+    try:
+        from openpyxl import load_workbook
+        wb = load_workbook(app_config_path, data_only=True)
+        ws = wb.active
+        inputs = {}
+        for r in range(1, ws.max_row + 1):
+            row = [ws.cell(r, c).value for c in range(1, ws.max_column + 1)]
+            if len(row) > 5 and row[3] is not None:
+                idx = row[3]
+                if isinstance(idx, (int, float)):
+                    inputs[int(idx)] = {
+                        "name": str(row[4]) if row[4] is not None else "",
+                        "type": str(row[5]) if row[5] is not None else "",
+                    }
+        return inputs
+    except Exception:
+        return {}

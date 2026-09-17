@@ -45,6 +45,27 @@ class YoloFloatDetector(BaseDetector):
         is_panto_raised = context.packet.is_panto_raised if (context and context.packet) else True
         timestamp = context.packet.timestamp if (context and context.packet) else 0.0
 
+        # 1. 正常升弓状态（is_panto_raised = True）：
+        #    受电弓处于接触网工作高度，属于正常工况，重置飘弓计数器，不触发异常飘弓告警
+        if is_panto_raised:
+            self.abnormal_frame_count = 0
+            self.trajectory.clear()
+            return DetectionResult(
+                fault_type=self.fault_type,
+                is_abnormal=False,
+                score=0.0,
+                level="normal",
+                bbox=panto_box,
+                extra={
+                    "abnormal_frame_count": 0,
+                    "is_panto_raised": True,
+                    "reason": "normal_raised",
+                },
+            )
+
+        # 2. 降弓状态（is_panto_raised = False）：
+        #    若视觉检测到受电弓高度超过降弓高度限值（panto_down_height_limit），
+        #    说明受电弓在降弓时发生风动漂浮或机械弹起，连续超标帧数后触发“异常飘弓故障”
         is_float_candidate = False
         metrics = {}
 
@@ -52,30 +73,22 @@ class YoloFloatDetector(BaseDetector):
             px1, py1, px2, py2 = panto_box
             yc = (py1 + py2) / 2.0
             height = float(py2 - py1)
+            metrics["height"] = round(height, 1)
 
-            # 工况 1：TCMS 指示处于降弓状态，但受电弓依然处于抬升位置
-            if not is_panto_raised:
-                if height > self.panto_down_height_limit:
-                    is_float_candidate = True
-                    metrics["reason"] = "down_state_raised"
-
-            # 工况 2：正常运行受流中，垂向中心发生剧烈高频超限跳变
+            if height > self.panto_down_height_limit:
+                is_float_candidate = True
+                metrics["reason"] = "down_state_raised"
             else:
-                if len(self.trajectory) >= 2:
-                    prev_t, prev_yc = self.trajectory[-1]
-                    dt = max(0.01, timestamp - prev_t)
-                    speed = abs(yc - prev_yc) / dt
-                    metrics["vertical_speed"] = round(speed, 1)
-                    if speed > self.float_speed_thresh:
-                        is_float_candidate = True
-                        metrics["reason"] = "excessive_vertical_bounce"
+                self.abnormal_frame_count = 0
 
             self.trajectory.append((timestamp, yc))
+        else:
+            self.abnormal_frame_count = 0
 
         if is_float_candidate:
             self.abnormal_frame_count += 1
         else:
-            self.abnormal_frame_count = max(0, self.abnormal_frame_count - 1)
+            self.abnormal_frame_count = 0
 
         is_abnormal = self.abnormal_frame_count >= self.consecutive_alarm_frames
         level = "critical" if is_abnormal else ("warning" if self.abnormal_frame_count >= 2 else "normal")
@@ -88,9 +101,10 @@ class YoloFloatDetector(BaseDetector):
             bbox=panto_box,
             extra={
                 "abnormal_frame_count": self.abnormal_frame_count,
-                "is_panto_raised": is_panto_raised,
+                "is_panto_raised": False,
+                "panto_down_height_limit": self.panto_down_height_limit,
                 **metrics,
-            }
+            },
         )
 
     def reset(self) -> None:

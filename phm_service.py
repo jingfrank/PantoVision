@@ -58,4 +58,5 @@ def create_monitor_phm_reporter(global_cfg, detectors, package_dir=None):
         log_output=bool(monitor_cfg.get("log_output", True)),
         log_enabled=log_enabled,
         output_field_names=OUTPUT_FIELD_NAMES,
+        shared_cfg=global_cfg,
     )

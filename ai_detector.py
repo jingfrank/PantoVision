@@ -122,6 +122,10 @@ class PantographFaultDetector:
         self.visualizer = Visualizer()
 
         # 5. 状态寄存器 (对齐 usrcode.py 与 PHM)
+        if "input_parameters" not in self.global_cfg:
+            self.global_cfg["input_parameters"] = {}
+        self.float_abnormal_cnt = 0
+        self.last_frame_ts = 0.0
         self._current_active_fault_types: Set[str] = set()
         self._last_active_fault_types: Set[str] = set()
 
@@ -134,30 +138,134 @@ class PantographFaultDetector:
             logger_name=f"perf_monitor.CAR{self.car_number}.CAM{self.camera_id}",
         )
 
-    # 供 usrcode.py 和 PHM 周期心跳读取的属性映射
+    # 供 usrcode.py 和 PHM 周期心跳读取与设置的属性映射
     @property
     def spark_alarmed(self) -> bool:
         return "big_spark" in self._current_active_fault_types
+
+    @spark_alarmed.setter
+    def spark_alarmed(self, val: bool) -> None:
+        if val:
+            self._current_active_fault_types.add("big_spark")
+        else:
+            self._current_active_fault_types.discard("big_spark")
 
     @property
     def structure_alarmed(self) -> bool:
         return "structure_abnormal" in self._current_active_fault_types
 
+    @structure_alarmed.setter
+    def structure_alarmed(self, val: bool) -> None:
+        if val:
+            self._current_active_fault_types.add("structure_abnormal")
+        else:
+            self._current_active_fault_types.discard("structure_abnormal")
+
     @property
     def dirty_alarmed(self) -> bool:
         return "dirty" in self._current_active_fault_types
+
+    @dirty_alarmed.setter
+    def dirty_alarmed(self, val: bool) -> None:
+        if val:
+            self._current_active_fault_types.add("dirty")
+        else:
+            self._current_active_fault_types.discard("dirty")
 
     @property
     def tilt_alarmed(self) -> bool:
         return "tilt" in self._current_active_fault_types
 
+    @tilt_alarmed.setter
+    def tilt_alarmed(self, val: bool) -> None:
+        if val:
+            self._current_active_fault_types.add("tilt")
+        else:
+            self._current_active_fault_types.discard("tilt")
+
     @property
     def foreign_alarmed(self) -> bool:
         return "foreign_object" in self._current_active_fault_types
 
+    @foreign_alarmed.setter
+    def foreign_alarmed(self, val: bool) -> None:
+        if val:
+            self._current_active_fault_types.add("foreign_object")
+        else:
+            self._current_active_fault_types.discard("foreign_object")
+
     @property
     def float_alarmed(self) -> bool:
         return "abnormal_float" in self._current_active_fault_types
+
+    @float_alarmed.setter
+    def float_alarmed(self, val: bool) -> None:
+        if val:
+            self._current_active_fault_types.add("abnormal_float")
+        else:
+            self._current_active_fault_types.discard("abnormal_float")
+
+    def reset_alarm_states(self) -> None:
+        """重置所有故障报警标志与跨帧缓存，防止断流或异常期间旧告警驻留虚警"""
+        self._current_active_fault_types.clear()
+        self._last_active_fault_types.clear()
+        self.float_abnormal_cnt = 0
+        if hasattr(self, "fusion"):
+            self.fusion.reset()
+
+    def is_streaming_active(self) -> bool:
+        """判断当前视频流是否处于正常活跃接收状态（超过 6 秒未收到有效帧判定为流中断）"""
+        if self.stop_event.is_set():
+            return False
+        if getattr(self, "last_frame_ts", 0.0) <= 0:
+            return True
+        return (time.time() - self.last_frame_ts) <= 6.0
+
+    def detect_arc_height(self, result: Any, is_panto_raised: bool = True) -> bool:
+        """
+        异常飘弓（abnormal_float）状态门控判断：
+        • 正常升弓状态（is_panto_raised = True）：受电弓处于接触网工作高度，属于正常工况，重置飘弓计数器，不触发异常飘弓告警；
+        • 降弓状态（is_panto_raised = False）：若视觉检测到受电弓高度超过降弓高度限值（panto_down_height_limit），
+          说明受电弓在降弓时发生风动漂浮或机械弹起，连续超标帧数后触发“异常飘弓故障”。
+        """
+        if is_panto_raised:
+            self.float_abnormal_cnt = 0
+            self.float_alarmed = False
+            return False
+
+        panto_down_height_limit = float(
+            self.global_cfg.get("algo_config", {}).get("panto_down_height_limit", 70.0)
+        )
+        fps = float(self.vs_cfg.get("fps", 25.0))
+        common_response_frames = int(
+            self.alarm_cfg.get("common_response_time_s", 3) * fps
+        )
+
+        panto_boxes = []
+        if hasattr(result, "boxes") and result.boxes is not None:
+            panto_boxes = [box for box in result.boxes if int(box.cls.item()) == 1]
+        elif isinstance(result, (list, tuple)):
+            panto_boxes = result
+
+        if panto_boxes:
+            if hasattr(panto_boxes[0], "xyxy"):
+                box = panto_boxes[0].xyxy[0].tolist()
+            else:
+                box = panto_boxes[0]
+            current_height = float(box[3] - box[1])
+            if current_height > panto_down_height_limit:
+                self.float_abnormal_cnt += 1
+            else:
+                self.float_abnormal_cnt = 0
+        else:
+            self.float_abnormal_cnt = 0
+
+        if self.float_abnormal_cnt >= common_response_frames:
+            self.float_alarmed = True
+            return True
+        else:
+            self.float_alarmed = False
+            return False
 
     def _ftp_upload_local_file(self, local_path: str) -> None:
         """异步将抓拍图片或完整视频上传到 NAS，并按策略清理"""
@@ -249,7 +357,64 @@ class PantographFaultDetector:
                         consecutive_none_packets = 100
                     continue
 
+                self.last_frame_ts = time.time()
                 consecutive_none_packets = 0
+
+                # ── 动态注入 TCMS/PHM 融合平台实时下发的输入变量 ─────────────────
+                # 参考《网络通信协议-融合主机相关.xls》与 AppConfig.xlsx 定义：
+                # 序号 0: 列车速度 (Unsigned16, 比例 0.01 km/h/bit)
+                # 序号 1~7: 年、月、日、时、分、秒、时间有效 (TCMS 物理时标)
+                # 序号 8: TP06升弓信号 (Boolean1, 1=升弓, 0=降弓)
+                # 序号 9: 公里标（HH/HL/LH/LL）(Unsigned32, 单位: 米, 0xFFFFFFFF 为未知)
+                input_params = self.global_cfg.get("input_parameters", {})
+
+                # 1. 升降弓状态信号注入 (序号 8: TP06升弓信号；兼容旧序号 3: wlpantoup06)
+                if 8 in input_params:
+                    packet.is_panto_raised = bool(input_params[8])
+                elif 3 in input_params:
+                    packet.is_panto_raised = bool(input_params[3])
+
+                # 2. 列车速度注入 (序号 0: 列车速度, 比例 0.01 km/h/bit；兼容旧序号 2)
+                if 0 in input_params:
+                    try:
+                        raw_spd = float(input_params[0])
+                        packet.speed = raw_spd * 0.01 if raw_spd > 655.35 else raw_spd
+                    except (ValueError, TypeError):
+                        pass
+                elif 2 in input_params:
+                    try:
+                        packet.speed = float(input_params[2])
+                    except (ValueError, TypeError):
+                        pass
+
+                # 3. 公里标注入 (序号 9: 公里标, 单位: 米；兼容旧序号 1)
+                if 9 in input_params:
+                    kp = input_params[9]
+                    if kp is not None and kp != 0xFFFFFFFF:
+                        packet.kilometer_post = int(kp)
+                elif 1 in input_params:
+                    kp = input_params[1]
+                    if kp is not None:
+                        try:
+                            packet.kilometer_post = int(kp)
+                        except (ValueError, TypeError):
+                            pass
+
+                # 4. TCMS 时间戳对齐 (序号 7 为时间有效信号，序号 1~6 为年月日时分秒)
+                if input_params.get(7) == 1:
+                    try:
+                        import datetime
+                        yr = int(input_params.get(1, 0))
+                        yr = (2000 + yr) if yr < 100 else yr
+                        mo = int(input_params.get(2, 1))
+                        dy = int(input_params.get(3, 1))
+                        hr = int(input_params.get(4, 0))
+                        mn = int(input_params.get(5, 0))
+                        sc = int(input_params.get(6, 0))
+                        dt = datetime.datetime(yr, mo, dy, hr, mn, sc)
+                        packet.timestamp = dt.timestamp()
+                    except Exception:
+                        pass
 
                 # ── 帧处理端到端计时开始 ──────────────────────────────────
                 t_frame_start = time.perf_counter()
