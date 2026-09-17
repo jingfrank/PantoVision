@@ -10,15 +10,14 @@ import numpy as np
 import cv2
 import logging
 from core.data_types import DetectionResult, DetectionContext
-from core.detectors.base import BaseDetector
+from core.detectors.fastad_base import FastADBaseDetector
 from core.detectors.registry import DetectorRegistry
-from fastad_detector import PantographFastADModel
 
 logger = logging.getLogger(__name__)
 
 
 @DetectorRegistry.register("FastadDirtDetector")
-class FastadDirtDetector(BaseDetector):
+class FastadDirtDetector(FastADBaseDetector):
     name: str = "dirt_fastad"
     fault_type: str = "dirty"
     input_size: tuple = (384, 384)
@@ -31,18 +30,11 @@ class FastadDirtDetector(BaseDetector):
         self.min_active_cells = config.get("min_active_cells", 6)
         self.dirt_score_thresh = config.get("dirt_score_thresh", 2.0)
 
-        logger.info(f"[{self.name}] 正在加载 FastAD 脏污模型权重: {model_path} ...")
-        self.model = PantographFastADModel.load(model_path)
-        logger.info(f"[{self.name}] FastAD 脏污模型加载成功")
+        # 使用共享模型注册表加载（同路径只加载一次 GPU 权重）
+        self.model = self._load_shared_model(model_path)
 
         self.dirt_grid_history: Optional[np.ndarray] = None
         self.history_length = 0
-
-    def preprocess(self, image: Any, context: Optional[DetectionContext] = None) -> Any:
-        return image
-
-    def infer(self, tensor: Any) -> Any:
-        return self.model.predict(tensor)
 
     def postprocess(self, raw_output: Any, context: Optional[DetectionContext] = None) -> DetectionResult:
         fastad_res = raw_output
@@ -65,6 +57,31 @@ class FastadDirtDetector(BaseDetector):
         gw, gh = self.grid_size, self.grid_size
         grid_anom = cv2.resize(dirt_clean, (gw, gh), interpolation=cv2.INTER_AREA)
         grid_active = (grid_anom >= pix_thresh).astype(np.float32)
+
+        # 自适应开阔视场校验 (Adaptive Sky/Aperture Check)
+        sky_cells = 0
+        panto_bbox = context.panto_bbox if (context and context.panto_bbox) else None
+        if panto_bbox:
+            # 正常检出受电弓时：以弓头顶端以上的纯天空视场作为基准
+            top_grid = max(1, int(panto_bbox[1] / h_dirt_limit * gh))
+            sky_cells = int(np.sum(grid_active[:top_grid, :]))
+
+            # 若受电弓存在但上方天空极其洁净 (sky_cells < 4)，说明异常严格限制在构件内部，绝非镜头光学污染
+            if sky_cells < 4:
+                self.dirt_grid_history = None
+                self.history_length = 0
+                return DetectionResult(
+                    fault_type=self.fault_type,
+                    is_abnormal=False,
+                    score=0.0,
+                    level="normal",
+                    bbox=None,
+                    extra={"sky_cells": sky_cells, "is_pending": False, "history_length": 0}
+                )
+        else:
+            # 严重脏污场景 (如 dirty_2.mp4 泥浆糊死镜头致 YOLO 漏检受电弓)：
+            # 回退采用车顶固定物理机位先验：顶部 25% 网格行 (0~16行) 恒定为高空开阔视域
+            sky_cells = int(np.sum(grid_active[:int(gh * 0.25), :]))
 
         # 时序 EMA 衰减累积 (网格坐标系绝对静止滤波)
         if self.dirt_grid_history is None:
@@ -106,6 +123,7 @@ class FastadDirtDetector(BaseDetector):
                 "persistent_cells": persistent_count,
                 "history_length": self.history_length,
                 "is_pending": is_dirt_pending,
+                "sky_cells": sky_cells,
                 "image_score": round(img_score, 2),
                 "image_thresh": round(img_thresh, 2),
             }

@@ -83,6 +83,15 @@ class UDPAlarmSender:
             )
             return True
 
+        except OSError as oe:
+            if oe.errno == 101:  # Network is unreachable
+                logger.warning(
+                    f"[UDP-Alarm] 告警目标网络不可达: {self.udp_ip}:{self.udp_port} "
+                    f"([Errno 101] Network is unreachable)。请确认台架网关路由或测试网段配置。"
+                )
+            else:
+                logger.error(f"[UDP-Alarm] 发射报文 OSError: {oe}")
+            return False
         except Exception as e:
             logger.error(f"[UDP-Alarm] 发射报文失败: {e}", exc_info=True)
             return False

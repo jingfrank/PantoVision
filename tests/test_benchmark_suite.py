@@ -60,14 +60,17 @@ def evaluate_video(
     print(f"  分辨率: {width}x{height} | 帧率: {fps:.1f} FPS | 目标总帧: {target_frames} (采样步长: {stride})")
     print(f"========================================================")
 
-    # 重置调度器所有插件的状态（时序窗口、EMA历史等）
+    # 重置调度器所有插件的状态（时序窗口、EMA历史等）及融合决策层缓存
     scheduler.reset_all()
+    fusion.reset()
 
     save_subdir = os.path.join(output_dir, os.path.splitext(video_name)[0])
     if save_snapshots:
         os.makedirs(save_subdir, exist_ok=True)
 
     frame_idx = start_frame
+    if start_frame > 0:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
     processed_count = 0
     latencies = []
     fault_counts: Dict[str, int] = {k: 0 for k in FAULT_NAME_MAP.keys()}
@@ -194,8 +197,9 @@ def evaluate_image(
     print(f"▶ 正在测试单张图片: {img_name} (分辨率: {w}x{h})")
     print(f"========================================================")
 
-    # 重置调度器所有插件的状态
+    # 重置调度器所有插件的状态及融合层状态
     scheduler.reset_all()
+    fusion.reset()
 
     packet = FramePacket(
         frame=img,
@@ -222,20 +226,26 @@ def evaluate_image(
     print("-" * 75)
 
     fault_counts = {k: 0 for k in FAULT_NAME_MAP.keys()}
-    for name, res in raw_results.items():
+    for name, res in fusion_res.detector_results.items():
         cn_name = FAULT_NAME_MAP.get(res.fault_type, res.fault_type)
-        abn_str = "🚨 异常" if res.is_abnormal else "正常"
         if res.is_abnormal:
+            abn_str = "🚨 异常"
             fault_counts[res.fault_type] = fault_counts.get(res.fault_type, 0) + 1
+        elif res.extra.get("suppressed_by"):
+            abn_str = "🛡️ 抑制"
+        else:
+            abn_str = "正常"
 
         extra_info = []
-        if res.bbox:
+        if res.bbox and res.is_abnormal:
             extra_info.append(f"bbox={res.bbox}")
+        if res.extra.get("suppressed_by"):
+            extra_info.append(f"suppressed_by={res.extra['suppressed_by']}")
         if res.fault_type == "tilt":
             extra_info.append(f"rel_tilt={res.extra.get('relative_tilt_deg', 0)}°({res.extra.get('status', 'NORMAL')})")
         elif res.fault_type == "dirty":
             extra_info.append(f"cells={res.extra.get('persistent_cells', 0)}, anom={res.extra.get('image_score', 0)}")
-        elif res.fault_type in ("foreign_object", "structure_abnormal"):
+        elif res.fault_type in ("foreign_object", "structure_abnormal") and res.is_abnormal:
             cnt = res.extra.get('foreign_count', res.extra.get('defect_count', 0))
             extra_info.append(f"count={cnt}")
         detail_str = ", ".join(extra_info) if extra_info else "-"

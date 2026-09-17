@@ -188,12 +188,17 @@ class PantographFaultDetector:
 
     def _create_stream_source(self):
         """根据配置自动适配 RTSP 实时网络流或本地测试视频文件"""
+        fps = self.vs_cfg.get("fps", 30)
+        sample_interval = 1.0 / max(fps, 1)
+        hang_timeout = float(self.vs_cfg.get("hang_timeout_sec", 30.0))
         if self.rtsp_url.startswith("rtsp://") or self.rtsp_url.startswith("rtsps://"):
             return RTSPStreamReader(
                 rtsp_url=self.rtsp_url,
                 car_number=self.car_number,
                 camera_id=self.camera_id,
-                train_id=self.train_id
+                train_id=self.train_id,
+                sample_interval=sample_interval,
+                hang_timeout_sec=hang_timeout,
             )
         else:
             local_path = self.rtsp_url

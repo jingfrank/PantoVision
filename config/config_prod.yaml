@@ -17,6 +17,7 @@ video_stream_config:
   fps: 30
   img_size: 640
   ffmpeg_restart_delay: 5
+  hang_timeout_sec: 30
 
 base_algorithm_config:
   engine_type: "tensorrt_qwen3_vl"

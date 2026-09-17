@@ -10,15 +10,14 @@ import numpy as np
 import cv2
 import logging
 from core.data_types import DetectionResult, DetectionContext
-from core.detectors.base import BaseDetector
+from core.detectors.fastad_base import FastADBaseDetector
 from core.detectors.registry import DetectorRegistry
-from fastad_detector import PantographFastADModel
 
 logger = logging.getLogger(__name__)
 
 
 @DetectorRegistry.register("FastadStructDetector")
-class FastadStructDetector(BaseDetector):
+class FastadStructDetector(FastADBaseDetector):
     name: str = "struct_fastad"
     fault_type: str = "structure_abnormal"
     input_size: tuple = (384, 384)
@@ -28,15 +27,8 @@ class FastadStructDetector(BaseDetector):
         self.min_defect_area = config.get("min_defect_area", 250)
         self.pantograph_roi_ratio = config.get("pantograph_roi_ratio", config.get("fallback_roi_ratio", [0.15, 0.15, 0.85, 0.70]))
 
-        logger.info(f"[{self.name}] 正在加载 FastAD 结构异常模型: {model_path} ...")
-        self.model = PantographFastADModel.load(model_path)
-        logger.info(f"[{self.name}] FastAD 结构异常模型加载完成")
-
-    def preprocess(self, image: Any, context: Optional[DetectionContext] = None) -> Any:
-        return image
-
-    def infer(self, tensor: Any) -> Any:
-        return self.model.predict(tensor)
+        # 使用共享模型注册表加载（同路径只加载一次 GPU 权重）
+        self.model = self._load_shared_model(model_path)
 
     def postprocess(self, raw_output: Any, context: Optional[DetectionContext] = None) -> DetectionResult:
         fastad_res = raw_output
@@ -47,11 +39,34 @@ class FastadStructDetector(BaseDetector):
 
         h, w = anomaly_map.shape[:2]
 
-        # 1. 采用原版 PantographFaultClassifier 空间几何 ROI (0.15, 0.15, 0.85, 0.70)
-        px1 = int(self.pantograph_roi_ratio[0] * w)
-        py1 = int(self.pantograph_roi_ratio[1] * h)
-        px2 = int(self.pantograph_roi_ratio[2] * w)
-        py2 = int(self.pantograph_roi_ratio[3] * h)
+        # 1. 严格使用 YOLO 检出的受电弓目标框，不使用原版静态几何 ROI，不进行任何外扩
+        panto_bbox = context.panto_bbox if (context and context.panto_bbox) else None
+        if not panto_bbox:
+            # 视野中未定位到受电弓目标（如 dirty_2 严重脏污），安全返回正常，杜绝误报
+            return DetectionResult(
+                fault_type=self.fault_type,
+                is_abnormal=False,
+                score=0.0,
+                level="normal",
+                bbox=None,
+                extra={"defect_count": 0, "bboxes": []}
+            )
+
+        px1, py1, px2, py2 = panto_bbox
+        px1 = max(0, min(w, int(px1)))
+        py1 = max(0, min(h, int(py1)))
+        px2 = max(0, min(w, int(px2)))
+        py2 = max(0, min(h, int(py2)))
+
+        if px2 <= px1 or py2 <= py1:
+            return DetectionResult(
+                fault_type=self.fault_type,
+                is_abnormal=False,
+                score=0.0,
+                level="normal",
+                bbox=None,
+                extra={"defect_count": 0, "bboxes": []}
+            )
 
         panto_anom = anomaly_map[py1:py2, px1:px2].copy()
 

@@ -12,7 +12,7 @@ def resolve_log_root() -> str:
     """日志根目录：板卡用 /hirain/hi_opt/algo_log，开发机回退到 local_cache/logs。"""
     if os.path.isdir(BOARD_ROOT_MARKER):
         return BOARD_LOG_ROOT
-    return "local_cache/logs"
+    return "app_log"
 
 
 def convert_to_hex(version_text):

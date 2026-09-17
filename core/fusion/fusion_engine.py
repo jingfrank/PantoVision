@@ -113,6 +113,8 @@ class FusionEngine:
             and (spark_res.is_abnormal or spark_res.extra.get("spark_count", 0) > 0)
         )
         dirt_active = bool(dirt_res and dirt_res.is_abnormal)
+        struct_active = bool(struct_res and struct_res.is_abnormal)
+        foreign_active = bool(foreign_res and foreign_res.is_abnormal)
 
         # ------------------------------------------------------------------
         # 规则 1：大火花强电弧抑制 (Spark Dominance)
@@ -129,12 +131,73 @@ class FusionEngine:
             suppress_dirty = True
 
         # ------------------------------------------------------------------
-        # 规则 2：画面脏污穿透抑制 (Dirt Isolation)
-        # 处于镜头脏污或脏污观察态时，抑制悬挂异物与结构异常向下穿透误报。
+        # 提取受电弓本体 BBox (由 YOLO 检出)
         # ------------------------------------------------------------------
-        if dirt_active or (dirt_res and dirt_res.extra.get("is_pending", False)):
+        panto_bbox = (
+            spark_res.extra.get("panto_bbox") if (spark_res and spark_res.extra)
+            else (float_res.bbox if float_res else None)
+        )
+
+        # ------------------------------------------------------------------
+        # 规则 2：画面脏污穿透抑制 (Dirt Isolation 精准优化)
+        # 1. 若镜头脏污已确诊 (dirt_active)，完全确认为光学玻璃污染，强制抑制悬挂异物与轻微结构异常；
+        # 2. 若仅处于脏污观察态 (is_pending)：
+        #    - 盲目失真判据：若镜头污损导致 YOLO 连受电弓本体都无法检出 (panto_bbox is None)，
+        #      视区严重失真，接触网异物检测不可信，在脏污观察态予以抑制；
+        #    - 接触网悬挂异物为列车高速运行中的瞬态局部目标，严禁因单帧突变被观察态误杀；
+        #    - 仅当异物斑块面积超过镜头尺度巨大门限 (80000 像素，占满视区的大面积泥浆)，才在观察态予以抑制；
+        #    - 结构异常未达 critical 级别时予以抑制。
+        # ------------------------------------------------------------------
+        if dirt_active:
             suppress_foreign = True
             suppress_struct = True
+        elif dirt_res and dirt_res.extra.get("is_pending", False):
+            suppress_struct = True
+            if foreign_active:
+                if panto_bbox is None:
+                    suppress_foreign = True
+                else:
+                    f_boxes = foreign_res.extra.get("bboxes", [foreign_res.bbox] if foreign_res.bbox else [])
+                    is_diffuse_lens_smudge = False
+                    for fb in f_boxes:
+                        box_area = (fb[2] - fb[0]) * (fb[3] - fb[1])
+                        if box_area >= 80000:
+                            is_diffuse_lens_smudge = True
+                            break
+                    if is_diffuse_lens_smudge:
+                        suppress_foreign = True
+
+        # ------------------------------------------------------------------
+        # 规则 4：受电弓结构缺陷与悬挂异物空间互斥仲裁 (Pantograph Body vs Foreign Object Exclusion)
+        # 当受电弓结构确诊异常时，若悬挂异物候选斑块落在受电弓本体包围框范围内，
+        # 判定该异常为受电弓结构破损本身，由结构异常独占接管，抑制接触网悬挂异物误报。
+        # ------------------------------------------------------------------
+        if struct_active and foreign_active and panto_bbox:
+            f_boxes = foreign_res.extra.get("bboxes", [foreign_res.bbox] if foreign_res.bbox else [])
+            if f_boxes:
+                px1, py1, px2, py2 = panto_bbox
+                all_inside = True
+                for fb in f_boxes:
+                    fx1, fy1, fx2, fy2 = fb
+                    ix1, iy1 = max(fx1, px1), max(fy1, py1)
+                    ix2, iy2 = min(fx2, px2), min(fy2, py2)
+                    inter_area = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+                    f_area = max(1, (fx2 - fx1) * (fy2 - fy1))
+                    overlap = inter_area / f_area
+                    if overlap < 0.30:
+                        all_inside = False
+                        break
+                if all_inside:
+                    suppress_foreign = True
+
+        # 若异物被抑制，同步重置合并集合中的状态，防止 HUD 视觉层画出黄色幽灵框
+        if suppress_foreign and "foreign_object" in merged:
+            f_copy = copy.copy(merged["foreign_object"])
+            f_copy.is_abnormal = False
+            f_copy.level = "normal"
+            f_copy.extra = dict(f_copy.extra)
+            f_copy.extra["suppressed_by"] = "structure_overlap" if struct_active else "dirt_isolation"
+            merged["foreign_object"] = f_copy
 
         # 收集有效告警清单
         active_alarms: List[Dict[str, Any]] = []

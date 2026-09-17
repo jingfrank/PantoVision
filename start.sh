@@ -22,9 +22,10 @@ echo "📄 本次日志文件: ${LOG_FILE}"
 echo "📄 最新日志快捷链接: ${LATEST_LOG}"
 echo "======================================================================"
 
-# 3. 强制 UTF-8 编码，彻底杜绝 Windows 查看乱码
+# 3. 强制 UTF-8 编码，彻底杜绝 Windows 查看乱码；全局配置 RTSP TCP 传输与超时双保险
 export PYTHONIOENCODING=utf-8
 export PYTHONUNBUFFERED=1
+export OPENCV_FFMPEG_CAPTURE_OPTIONS="rtsp_transport;tcp|stimeout;3000000|max_delay;500000"
 
 # 4. 允许通过参数指定配置文件，默认读取 config/config_prod.yaml
 CONFIG_FILE="${1:-config/config_prod.yaml}"
@@ -36,6 +37,14 @@ CONFIG_FILE="${1:-config/config_prod.yaml}"
 python3 -u main.py "$CONFIG_FILE" 2>&1 \
     | sed -u 's/\x1b\[[0-9;]*[a-zA-Z]//g' \
     | tee -a "$LOG_FILE"
+
+EXIT_CODE=${PIPESTATUS[0]}
+if [ $EXIT_CODE -ne 0 ]; then
+    echo "⚠️ [系统提示] 主程序异常退出，退出码: ${EXIT_CODE}" | tee -a "$LOG_FILE"
+    if [ $EXIT_CODE -eq 139 ]; then
+        echo "💥 [致命提示] 发生 Segmentation fault (段错误 139)，请检查底层 C/CUDA 动态链接库或解码库。" | tee -a "$LOG_FILE"
+    fi
+fi
 
 # 运行结束后同步生成一份 latest.log，方便一键查看最新结果
 cp -f "$LOG_FILE" "$LATEST_LOG" 2>/dev/null || true

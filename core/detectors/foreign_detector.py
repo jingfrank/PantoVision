@@ -10,15 +10,14 @@ import numpy as np
 import cv2
 import logging
 from core.data_types import DetectionResult, DetectionContext
-from core.detectors.base import BaseDetector
+from core.detectors.fastad_base import FastADBaseDetector
 from core.detectors.registry import DetectorRegistry
-from fastad_detector import PantographFastADModel
 
 logger = logging.getLogger(__name__)
 
 
 @DetectorRegistry.register("FastadForeignDetector")
-class FastadForeignDetector(BaseDetector):
+class FastadForeignDetector(FastADBaseDetector):
     name: str = "foreign_fastad"
     fault_type: str = "foreign_object"
     input_size: tuple = (384, 384)
@@ -30,15 +29,8 @@ class FastadForeignDetector(BaseDetector):
         self.max_blobs_filter = config.get("max_blobs_filter", 12)
         self.foreign_score_threshold = config.get("foreign_score_threshold", 2.2)
 
-        logger.info(f"[{self.name}] 正在加载 FastAD 悬挂异物模型: {model_path} ...")
-        self.model = PantographFastADModel.load(model_path)
-        logger.info(f"[{self.name}] FastAD 悬挂异物模型加载完成")
-
-    def preprocess(self, image: Any, context: Optional[DetectionContext] = None) -> Any:
-        return image
-
-    def infer(self, tensor: Any) -> Any:
-        return self.model.predict(tensor)
+        # 使用共享模型注册表加载（同路径只加载一次 GPU 权重）
+        self.model = self._load_shared_model(model_path)
 
     def postprocess(self, raw_output: Any, context: Optional[DetectionContext] = None) -> DetectionResult:
         fastad_res = raw_output
