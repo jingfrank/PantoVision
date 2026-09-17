@@ -218,13 +218,38 @@ class PantographFaultDetector:
         stream_source.start()
 
         try:
+            consecutive_none_packets = 0
             while not self.stop_event.is_set():
                 packet: Optional[FramePacket] = stream_source.get_packet(timeout=1.0)
                 if packet is None:
                     if isinstance(stream_source, VideoFileReader):
                         logger.info(f"[AI-CAR{self.car_number}-CAM{self.camera_id}] 离线视频处理完毕")
                         break
+
+                    consecutive_none_packets += 1
+
+                    # 断流期间持续检查是否有已达 60 秒的录像任务需要收尾并投递合成
+                    if len(self.ring_buffer.pending_tasks) > 0:
+                        completed_videos = self.ring_buffer.finalize_recordings(time.time())
+                        if completed_videos:
+                            for vid_path in completed_videos:
+                                self._ftp_upload_local_file(vid_path)
+
+                    # 若连续 3 秒无有效视频帧（确诊断流），立即复位残留故障状态与跨帧缓存，避免断流后虚假报故障
+                    if consecutive_none_packets >= 3 and self._current_active_fault_types:
+                        logger.warning(
+                            f"[AI-CAR{self.car_number}-CAM{self.camera_id}] "
+                            f"视频流中断超过 3 秒，自动清空残留告警状态与融合缓存，恢复正常无故障状态"
+                        )
+                        self._current_active_fault_types.clear()
+                        self._last_active_fault_types.clear()
+                        self.fusion.reset()
+
+                    if consecutive_none_packets > 100:
+                        consecutive_none_packets = 100
                     continue
+
+                consecutive_none_packets = 0
 
                 # ── 帧处理端到端计时开始 ──────────────────────────────────
                 t_frame_start = time.perf_counter()
