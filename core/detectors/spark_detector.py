@@ -71,6 +71,26 @@ class YoloSparkDetector(BaseDetector):
                 context.panto_bbox = best_panto_box
                 context.panto_confidence = panto_boxes[0][1]
 
+        # 降弓工况门控：副弓脱网无受流电流，清空火花时序计数器，静默大火花告警；
+        # 但保留 YOLO 提取的受电弓目标框供后续 YoloFloatDetector 复用，避免重复推理
+        is_panto_raised = context.packet.is_panto_raised if (context and context.packet) else True
+        if not is_panto_raised:
+            self.current_duration_count = 0
+            self.alarmed = False
+            return DetectionResult(
+                fault_type=self.fault_type,
+                is_abnormal=False,
+                score=0.0,
+                level="normal",
+                bbox=best_panto_box,
+                extra={
+                    "panto_bbox": best_panto_box,
+                    "is_panto_raised": False,
+                    "status": "panto_lowered_muted",
+                    "spark_count": 0,
+                }
+            )
+
         # 2. 火花空间尺度与持续时间判决
         has_spark_target = False
         target_spark_bbox = None

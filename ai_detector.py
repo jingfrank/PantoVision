@@ -30,7 +30,7 @@ from core.data_types import FramePacket, FusionResult
 from core.scheduler import DetectionScheduler
 from core.fusion import FusionEngine, FAULT_NAME_MAP
 from core.ingestion import RTSPStreamReader, VideoFileReader, RingFrameBuffer
-from core.output import UDPAlarmSender, StorageManager, Visualizer, draw_osd_watermark, AsyncNasUploader
+from core.output import UDPAlarmSender, StorageManager, Visualizer, AsyncNasUploader
 from core.perf_monitor import PerformanceMonitor
 
 logger = logging.getLogger("ai_detector")
@@ -212,6 +212,8 @@ class PantographFaultDetector:
         self.float_abnormal_cnt = 0
         if hasattr(self, "fusion"):
             self.fusion.reset()
+        if hasattr(self, "scheduler"):
+            self.scheduler.reset_all()
 
     def is_streaming_active(self) -> bool:
         """判断当前视频流是否处于正常活跃接收状态（超过 6 秒未收到有效帧判定为流中断）"""
@@ -327,6 +329,7 @@ class PantographFaultDetector:
 
         try:
             consecutive_none_packets = 0
+            is_stream_interrupted = False
             while not self.stop_event.is_set():
                 packet: Optional[FramePacket] = stream_source.get_packet(timeout=1.0)
                 if packet is None:
@@ -343,19 +346,26 @@ class PantographFaultDetector:
                             for vid_path in completed_videos:
                                 self._ftp_upload_local_file(vid_path)
 
-                    # 若连续 3 秒无有效视频帧（确诊断流），立即复位残留故障状态与跨帧缓存，避免断流后虚假报故障
-                    if consecutive_none_packets >= 3 and self._current_active_fault_types:
+                    # 若连续 3 秒无有效视频帧（确诊断流），立即彻底复位残留故障状态、融合缓存与所有检测器内部时序计数器
+                    if consecutive_none_packets >= 3 and not is_stream_interrupted:
                         logger.warning(
                             f"[AI-CAR{self.car_number}-CAM{self.camera_id}] "
-                            f"视频流中断超过 3 秒，自动清空残留告警状态与融合缓存，恢复正常无故障状态"
+                            f"视频流中断超过 3 秒，自动清空残留告警状态、融合缓存与所有检测器时序计数器，防止切流虚警"
                         )
-                        self._current_active_fault_types.clear()
-                        self._last_active_fault_types.clear()
-                        self.fusion.reset()
+                        self.reset_alarm_states()
+                        is_stream_interrupted = True
 
                     if consecutive_none_packets > 100:
                         consecutive_none_packets = 100
                     continue
+
+                if is_stream_interrupted:
+                    logger.info(
+                        f"[AI-CAR{self.car_number}-CAM{self.camera_id}] "
+                        f"视频流断开后重新恢复连通，再次重置算法引擎内部时序状态，以纯净初始状态开始新流检测"
+                    )
+                    self.reset_alarm_states()
+                    is_stream_interrupted = False
 
                 self.last_frame_ts = time.time()
                 consecutive_none_packets = 0
@@ -477,7 +487,7 @@ class PantographFaultDetector:
 
                 self._last_active_fault_types = set(self._current_active_fault_types)
 
-                # 5. 环形缓冲：收集后60秒帧与定期合成完整视频并上传
+                # 5. 环形缓冲：持续缓存帧，收集后60秒帧与定期合成完整视频并上传
                 cache_frame = hud_frame if hud_frame is not None else packet.frame
                 self.ring_buffer.append(packet.timestamp, cache_frame)
                 self.ring_buffer.collect_post_frame(packet.timestamp, cache_frame)

@@ -151,7 +151,25 @@ class DetectionScheduler:
             if not detector.enabled:
                 continue
 
-            # 2. 分频调度检查 (若 force_run_all=True 如单图测试，则强制运行所有启用插件)
+            # 2. 降弓/升弓工况门控 (Pantograph State Gate)
+            # panto_gate 字段在 detectors.yaml 的 schedule 节点中配置：
+            #   "raised_only"  — 仅升弓时运行（降弓时静默跳过）
+            #   "lowered_only" — 仅降弓时运行（升弓时静默跳过）
+            #   "always"       — 不受工况限制（默认值，向后兼容）
+            panto_gate = getattr(detector, "schedule_cfg", {}).get("panto_gate", "always")
+            is_raised = packet.is_panto_raised if packet else True
+            if not is_raised and panto_gate == "raised_only":
+                logger.debug(
+                    "[Scheduler-PantoGate] 降弓工况，跳过检测器 [%s] (panto_gate=raised_only)", name
+                )
+                continue
+            if is_raised and panto_gate == "lowered_only":
+                logger.debug(
+                    "[Scheduler-PantoGate] 升弓工况，跳过检测器 [%s] (panto_gate=lowered_only)", name
+                )
+                continue
+
+            # 3. 分频调度检查 (若 force_run_all=True 如单图测试，则强制运行所有启用插件)
             if not force_run_all and not self._should_run(detector, packet):
                 continue
 

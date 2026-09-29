@@ -7,6 +7,20 @@
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$BASE_DIR"
 
+# 自动关联持久化模型库（自适应 B/S 主程序随机 UUID 子目录部署，免去重复拷贝 1GB 模型）
+if [ ! -d "models" ] || [ ! -f "models/best.pt" ]; then
+    if [ -d "../models" ] && [ -f "../models/best.pt" ]; then
+        ln -sfn ../models models
+        echo "🔗 [模型探测] 已自动关联父级模型库: $(pwd)/models -> ../models"
+    elif [ -d "/models" ] && [ -f "/models/best.pt" ]; then
+        ln -sfn /models models
+        echo "🔗 [模型探测] 已自动关联全局模型库: $(pwd)/models -> /models"
+    elif [ -d "/hirain/hi_opt/algo/container_gongwang/models" ] && [ -f "/hirain/hi_opt/algo/container_gongwang/models/best.pt" ]; then
+        ln -sfn /hirain/hi_opt/algo/container_gongwang/models models
+        echo "🔗 [模型探测] 已自动关联标准持久化模型库: $(pwd)/models -> /hirain/hi_opt/algo/container_gongwang/models"
+    fi
+fi
+
 # 1. 创建日志目录（放在 local_cache/logs 下，宿主机桌面直接可见）
 LOG_DIR="${BASE_DIR}/local_cache/logs"
 mkdir -p "$LOG_DIR"
