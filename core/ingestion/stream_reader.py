@@ -6,6 +6,9 @@ Provides asynchronous RTSP capture with automatic reconnection and offline video
 """
 
 import os
+import re
+import socket
+import subprocess
 import time
 import cv2
 import queue
@@ -21,6 +24,164 @@ logger = logging.getLogger(__name__)
 mp_ctx = mp.get_context("spawn")
 
 
+# ==============================================================================
+# RTSP 视频流编码探测与 Jetson GStreamer 管道构建
+# ==============================================================================
+
+def probe_rtsp_codec_socket(rtsp_url: str, timeout: float = 1.5) -> Optional[str]:
+    """
+    通过原生 Socket 发送 RTSP DESCRIBE 请求解析 SDP 媒体行。
+    零依赖、毫秒级响应，适用于无密码的模拟推流 (EasyDarwin / FFmpeg / 部分相机)。
+    """
+    try:
+        match = re.match(r"rtsps?://(?:([^:@]+)(?::([^@]+))?@)?([^:/]+)(?::(\d+))?(/.*)?", rtsp_url)
+        if not match:
+            return None
+        _, _, host, port_str, path = match.groups()
+        port = int(port_str) if port_str else 554
+        path = path if path else "/"
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        try:
+            sock.connect((host, port))
+            req = (
+                f"DESCRIBE {rtsp_url} RTSP/1.0\r\n"
+                f"CSeq: 1\r\n"
+                f"Accept: application/sdp\r\n"
+                f"User-Agent: GongwangMonitor/1.0\r\n\r\n"
+            )
+            sock.sendall(req.encode('utf-8'))
+
+            response = b""
+            while True:
+                chunk = sock.recv(2048)
+                if not chunk:
+                    break
+                response += chunk
+                if b"\r\n\r\n" in response and len(response) > 512:
+                    break
+        finally:
+            sock.close()
+
+        res_text = response.decode('utf-8', errors='ignore')
+        if "401 Unauthorized" in res_text:
+            return None
+
+        res_upper = res_text.upper()
+        if "H265" in res_upper or "HEVC" in res_upper:
+            return "h265"
+        if "H264" in res_upper or "AVC" in res_upper:
+            return "h264"
+    except Exception:
+        pass
+    return None
+
+
+def probe_rtsp_codec_ffprobe(rtsp_url: str, timeout: float = 3.0) -> Optional[str]:
+    """
+    调用 ffprobe 进行权威探测，支持 URL 内置的鉴权账号密码（如海康威视相机）。
+    """
+    try:
+        cmd = [
+            "ffprobe", "-v", "error",
+            "-rtsp_transport", "tcp",
+            "-stimeout", str(int(timeout * 1000000)),
+            "-select_streams", "v:0",
+            "-show_entries", "stream=codec_name",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            rtsp_url
+        ]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout)
+        codec = res.stdout.strip().lower()
+        if "265" in codec or "hevc" in codec:
+            return "h265"
+        elif "264" in codec or "avc" in codec:
+            return "h264"
+    except Exception:
+        pass
+    return None
+
+
+def detect_rtsp_codec(rtsp_url: str, fallback: str = "h264") -> str:
+    """
+    综合探测 RTSP 流编码格式，优先 Socket 毫秒探测，失败则回退至 ffprobe 鉴权探测。
+    """
+    codec = probe_rtsp_codec_socket(rtsp_url, timeout=1.0)
+    if codec:
+        return codec
+    codec = probe_rtsp_codec_ffprobe(rtsp_url, timeout=3.0)
+    if codec:
+        return codec
+    return fallback
+
+
+def build_jetson_gst_pipeline(rtsp_url: str, codec: str = "h264", latency_ms: int = 0) -> str:
+    """
+    构造 Jetson AGX Orin 专用的硬件解码与格式转换管道。
+    关键优化点:
+    1. latency={latency_ms} + drop-on-latency=true 消除网络抖动积压；
+    2. nvv4l2decoder enable-max-performance=1 drop-frame-interval=0 极速硬解；
+    3. nvvidconv 直接硬件输出 BGRx 规避 CPU videoconvert 瓶颈；
+    4. appsink drop=1 max-buffers=1 保持实时单帧吞吐。
+    """
+    depay = "rtph264depay ! h264parse" if codec == "h264" else "rtph265depay ! h265parse"
+    return (
+        f"rtspsrc location={rtsp_url} latency={latency_ms} protocols=tcp drop-on-latency=true ! "
+        f"{depay} ! "
+        f"nvv4l2decoder enable-max-performance=1 drop-frame-interval=0 ! "
+        f"nvvidconv ! video/x-raw, format=BGRx ! "
+        f"appsink drop=1 max-buffers=1 sync=false"
+    )
+
+
+def _open_capture(
+    rtsp_url: str,
+    decoder_backend: str,
+    codec_type: str,
+    gstreamer_latency_ms: int,
+    worker_logger: logging.Logger
+) -> Tuple[Optional[cv2.VideoCapture], str]:
+    """
+    建立视频连接，优先尝试 Jetson GStreamer NVDEC 硬件解码，
+    若失败则自动尝试倒换编码或平滑降级至 FFmpeg 软件解码。
+    """
+    if decoder_backend in ("gstreamer_nvdec", "nvdec", "auto"):
+        target_codec = codec_type
+        if target_codec == "auto":
+            worker_logger.info(f"[RTSP-Worker] 正在自适应探测视频编码: {rtsp_url} ...")
+            target_codec = detect_rtsp_codec(rtsp_url, fallback="h264")
+            worker_logger.info(f"[RTSP-Worker] 视频编码探测命中: {target_codec.upper()}")
+
+        gst_pipe = build_jetson_gst_pipeline(rtsp_url, codec=target_codec, latency_ms=gstreamer_latency_ms)
+        worker_logger.info(f"[RTSP-Worker] 尝试启动 Jetson NVDEC 硬解管道 ({target_codec.upper()}): {gst_pipe}")
+        cap = cv2.VideoCapture(gst_pipe, cv2.CAP_GSTREAMER)
+        if cap.isOpened():
+            worker_logger.info(f"[RTSP-Worker] ✅ 成功开启 Jetson NVDEC 硬件解码 ({target_codec.upper()})")
+            return cap, "nvdec"
+
+        # 若失败且为 auto，尝试倒换编码 (h264 <-> h265)
+        if codec_type == "auto":
+            alt_codec = "h265" if target_codec == "h264" else "h264"
+            worker_logger.warning(f"[RTSP-Worker] NVDEC {target_codec.upper()} 开启失败，尝试倒换至 {alt_codec.upper()} 硬解...")
+            gst_pipe_alt = build_jetson_gst_pipeline(rtsp_url, codec=alt_codec, latency_ms=gstreamer_latency_ms)
+            cap_alt = cv2.VideoCapture(gst_pipe_alt, cv2.CAP_GSTREAMER)
+            if cap_alt.isOpened():
+                worker_logger.info(f"[RTSP-Worker] ✅ 倒换成功，已开启 Jetson NVDEC 硬件解码 ({alt_codec.upper()})")
+                return cap_alt, "nvdec"
+
+        worker_logger.warning("[RTSP-Worker] Jetson NVDEC 硬件解码不可用或初始化失败，平滑降级至 FFmpeg 软件解码...")
+
+    # FFmpeg 软件解码回退/原生模式
+    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|stimeout;3000000|max_delay;500000"
+    cap_ff = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
+    if cap_ff.isOpened():
+        worker_logger.info("[RTSP-Worker] ✅ 成功开启 FFmpeg 软件解码连接")
+        return cap_ff, "ffmpeg"
+
+    return None, "none"
+
+
 def _rtsp_capture_worker(
     rtsp_url: str,
     car_number: int,
@@ -30,13 +191,17 @@ def _rtsp_capture_worker(
     frame_queue: Any,
     stop_event: Any,
     shared_heartbeat: Any,
+    decoder_backend: str = "gstreamer_nvdec",
+    codec_type: str = "auto",
+    gstreamer_latency_ms: int = 0,
 ) -> None:
     """
     RTSP 独立拉流子进程入口函数：
-    1. 完全物理隔离底层 C/C++ (FFmpeg) 的潜在 SIGSEGV 段错误；
-    2. 开局单次注入 TCP 传输与超时选项，彻底杜绝重连循环内重复赋值；
-    3. 子进程独立规范化日志输出，清晰感知流连通状态；
-    4. 5 秒标准重试周期，并在循环中持续刷新 shared_heartbeat，彻底消除误杀死循环。
+    1. 完全物理隔离底层 C/C++ 动态链接库的潜在 SIGSEGV 段错误；
+    2. 支持 Jetson AGX Orin 专用 GStreamer NVDEC 硬件解码 (H.264/H.265 自适应)；
+    3. 若硬件解码异常自动平滑回退至 FFmpeg 软件解码；
+    4. 子进程独立规范化日志输出，清晰感知流连通状态；
+    5. 5 秒标准重试周期，并在循环中持续刷新 shared_heartbeat，彻底消除误杀死循环。
     """
     # ── 初始化子进程独立日志 ──────────────────────────────────────────
     logging.basicConfig(
@@ -45,9 +210,6 @@ def _rtsp_capture_worker(
         datefmt="%Y-%m-%d %H:%M:%S"
     )
     worker_logger = logging.getLogger("core.ingestion.stream_reader.worker")
-
-    # ── 1. 在子进程入口单次配置底层环境变量 ─────────────────────────
-    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|stimeout;3000000|max_delay;500000"
 
     def _interruptible_sleep(seconds: float, step: float = 0.5) -> None:
         """分段可中断休眠并持续刷新心跳，防止休眠期间心跳过时且支持秒级快速响应退出"""
@@ -65,24 +227,30 @@ def _rtsp_capture_worker(
 
         # ── 阻塞点 1: 建连探测双侧刷新心跳 ──────────────────────────────
         shared_heartbeat.value = time.time()
-        # 显式声明使用 cv2.CAP_FFMPEG 后端，绕过 GStreamer 管道探测，确保 TCP 传输生效
-        cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
+        cap, active_backend = _open_capture(
+            rtsp_url=rtsp_url,
+            decoder_backend=decoder_backend,
+            codec_type=codec_type,
+            gstreamer_latency_ms=gstreamer_latency_ms,
+            worker_logger=worker_logger
+        )
         shared_heartbeat.value = time.time()
 
-        if not cap.isOpened():
+        if cap is None or not cap.isOpened():
             # ── 阻塞点 2: 释放资源双侧刷新心跳 ──────────────────────────
             shared_heartbeat.value = time.time()
-            try:
-                cap.release()
-            except Exception:
-                pass
+            if cap is not None:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
             shared_heartbeat.value = time.time()
 
             worker_logger.warning(f"[RTSP-Worker] 无法打开 RTSP 流: {rtsp_url} (推流未就绪)，5秒后重试...")
             _interruptible_sleep(5.0, step=0.5)
             continue
 
-        worker_logger.info(f"[RTSP-Worker] ✅ 成功连接 RTSP 流: {rtsp_url}，进入实时读帧")
+        worker_logger.info(f"[RTSP-Worker] ✅ 成功建立流连接 (后端: {active_backend})，进入实时读帧")
         last_sample = 0.0
         last_valid_frame_time = time.time()
         consecutive_read_fails = 0
@@ -102,6 +270,10 @@ def _rtsp_capture_worker(
                     break
                 _interruptible_sleep(0.01, step=0.01)
                 continue
+
+            # 处理 BGRx 4 通道格式（nvvidconv 硬件转换输出），快速转换为标准 3 通道 BGR
+            if frame.ndim == 3 and frame.shape[2] == 4:
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
 
             # 校验图像完整性，防止截断的残破帧流向下游引发检测器异常
             if frame.ndim != 3 or frame.shape[0] < 100 or frame.shape[1] < 100:
@@ -172,7 +344,10 @@ class RTSPStreamReader(BaseStreamSource):
         camera_id: int = 0,
         train_id: str = "CR400BF",
         sample_interval: float = 0.033,
-        hang_timeout_sec: float = 30.0
+        hang_timeout_sec: float = 30.0,
+        decoder_backend: str = "gstreamer_nvdec",
+        codec_type: str = "auto",
+        gstreamer_latency_ms: int = 0,
     ):
         self.rtsp_url = rtsp_url
         self.car_number = car_number
@@ -180,6 +355,9 @@ class RTSPStreamReader(BaseStreamSource):
         self.train_id = train_id
         self.sample_interval = sample_interval
         self.hang_timeout_sec = hang_timeout_sec
+        self.decoder_backend = decoder_backend
+        self.codec_type = codec_type
+        self.gstreamer_latency_ms = gstreamer_latency_ms
         self.running = False
         self.frame_queue = mp_ctx.Queue(maxsize=10)
         self.stop_event = mp_ctx.Event()
@@ -213,6 +391,9 @@ class RTSPStreamReader(BaseStreamSource):
                     self.frame_queue,
                     self.stop_event,
                     self.shared_heartbeat,
+                    self.decoder_backend,
+                    self.codec_type,
+                    self.gstreamer_latency_ms,
                 ),
                 name=f"RTSPWorker-CAR{self.car_number}-CAM{self.camera_id}",
                 daemon=True,

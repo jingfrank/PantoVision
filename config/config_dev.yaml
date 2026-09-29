@@ -8,6 +8,9 @@ hardware_config:
   camera_id: 0
 
 video_stream_config:
+  decoder_backend: "gstreamer_nvdec"  # 可选: "gstreamer_nvdec", "ffmpeg"
+  codec_type: "auto"                 # 可选: "auto" (自动探测), "h264", "h265"
+  gstreamer_latency_ms: 0            # 极低延时模式设置为 0
   streams:
     - rtsp_url: "./弓网典型视频/dirty_1.mp4"
       camera_id: 0

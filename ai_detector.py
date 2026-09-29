@@ -301,6 +301,10 @@ class PantographFaultDetector:
         fps = self.vs_cfg.get("fps", 30)
         sample_interval = 1.0 / max(fps, 1)
         hang_timeout = float(self.vs_cfg.get("hang_timeout_sec", 30.0))
+        decoder_backend = self.vs_cfg.get("decoder_backend", "gstreamer_nvdec")
+        codec_type = self.vs_cfg.get("codec_type", "auto")
+        gst_latency = int(self.vs_cfg.get("gstreamer_latency_ms", 0))
+
         if self.rtsp_url.startswith("rtsp://") or self.rtsp_url.startswith("rtsps://"):
             return RTSPStreamReader(
                 rtsp_url=self.rtsp_url,
@@ -309,6 +313,9 @@ class PantographFaultDetector:
                 train_id=self.train_id,
                 sample_interval=sample_interval,
                 hang_timeout_sec=hang_timeout,
+                decoder_backend=decoder_backend,
+                codec_type=codec_type,
+                gstreamer_latency_ms=gst_latency,
             )
         else:
             local_path = self.rtsp_url
@@ -331,7 +338,10 @@ class PantographFaultDetector:
             consecutive_none_packets = 0
             is_stream_interrupted = False
             while not self.stop_event.is_set():
+                t_get_0 = time.perf_counter()
                 packet: Optional[FramePacket] = stream_source.get_packet(timeout=1.0)
+                t_get_1 = time.perf_counter()
+                ingest_ms = (t_get_1 - t_get_0) * 1000.0
                 if packet is None:
                     if isinstance(stream_source, VideoFileReader):
                         logger.info(f"[AI-CAR{self.car_number}-CAM{self.camera_id}] 离线视频处理完毕")
@@ -504,7 +514,7 @@ class PantographFaultDetector:
                         queue_depth = stream_source.frame_queue.qsize()
                     except Exception:
                         pass
-                self.perf_monitor.tick(packet, raw_results, wall_ms, queue_depth)
+                self.perf_monitor.tick(packet, raw_results, wall_ms, queue_depth, ingest_ms=ingest_ms)
 
         except Exception as e:
             logger.error(f"[AI-CAR{self.car_number}-CAM{self.camera_id}] 主循环异常: {e}", exc_info=True)

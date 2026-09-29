@@ -97,6 +97,9 @@ class PerformanceMonitor:
         # 队列深度样本
         self._queue_depth_samples: List[int] = []
 
+        # 取流与解码耗时样本
+        self._ingest_ms_samples: List[float] = []
+
         # 各检测器统计
         self._detector_stats: Dict[str, _DetectorStats] = defaultdict(_DetectorStats)
 
@@ -110,6 +113,7 @@ class PerformanceMonitor:
         results: Dict[str, "DetectionResult"],
         wall_ms: float,
         queue_depth: int = 0,
+        ingest_ms: Optional[float] = None,
     ) -> None:
         """
         每帧处理结束后调用一次。
@@ -119,6 +123,7 @@ class PerformanceMonitor:
             results:     本帧各检测器输出（含 extra["latency_ms"]）
             wall_ms:     本帧端到端耗时（毫秒，由调用方用 perf_counter 计算）
             queue_depth: 当前帧队列积压深度（RTSPStreamReader.frame_queue.qsize()）
+            ingest_ms:   当前帧从取流队列读取与解码耗时（毫秒）
         """
         if not self.enabled:
             return
@@ -131,6 +136,10 @@ class PerformanceMonitor:
 
             # 端到端耗时
             self._wall_ms_samples.append(wall_ms)
+
+            # 解码与取流耗时
+            if ingest_ms is not None:
+                self._ingest_ms_samples.append(ingest_ms)
 
             # 流延迟：wall clock - 帧入队时的系统时间戳
             lag = now_wall - packet.timestamp
@@ -183,6 +192,13 @@ class PerformanceMonitor:
         q_avg = sum(self._queue_depth_samples) / n if n else 0.0
         q_max = max(self._queue_depth_samples) if self._queue_depth_samples else 0
 
+        # 解码取流耗时统计
+        ingest_str = ""
+        if self._ingest_ms_samples:
+            ingest_avg = sum(self._ingest_ms_samples) / len(self._ingest_ms_samples)
+            ingest_max = max(self._ingest_ms_samples)
+            ingest_str = f"解码取流耗时: avg={ingest_avg:.1f}ms  max={ingest_max:.1f}ms"
+
         sep = "═" * 54
         lines = [
             sep,
@@ -190,10 +206,14 @@ class PerformanceMonitor:
             f"算法 FPS:  {algo_fps:.1f} fps  "
             f"(源标称: {self.source_fps:.1f} fps)  比率: {fps_ratio:.1f}%",
             f"端到端耗时:  avg={wall_avg:.1f}ms  max={wall_max:.1f}ms  p95={wall_p95:.1f}ms",
+        ]
+        if ingest_str:
+            lines.append(ingest_str)
+        lines.extend([
             f"流延迟(Lag): avg={lag_avg:+.3f}s  max={lag_max:+.3f}s  "
             f"{'⚠ 积压' if lag_avg > 1.0 else '✓ 正常'}",
             f"队列深度:   avg={q_avg:.1f}  max={q_max}",
-        ]
+        ])
 
         # 各检测器明细
         if self._detector_stats:
@@ -215,6 +235,7 @@ class PerformanceMonitor:
         self._window_start = now_mono
         self._frame_count = 0
         self._wall_ms_samples.clear()
+        self._ingest_ms_samples.clear()
         self._lag_samples.clear()
         self._queue_depth_samples.clear()
         for stats in self._detector_stats.values():
