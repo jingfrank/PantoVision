@@ -9,6 +9,7 @@ import os
 import sys
 import cv2
 import torch
+import torch.nn.functional as F
 import numpy as np
 import torchvision.transforms as transforms
 from typing import Optional, Tuple, Dict, Union, List
@@ -46,6 +47,9 @@ class PantographFastADModel:
         pretrained_weights_path: Optional[str] = None,
         anomaly_threshold: float = 2.0,
         device: Optional[str] = None,
+        prefer_tensorrt: bool = True,
+        engine_path: Optional[str] = None,
+        use_gpu_preprocess: bool = True,
     ):
         if device is None:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -68,6 +72,20 @@ class PantographFastADModel:
         self.regularization = regularization
         self.pretrained_weights_path = pretrained_weights_path
         self.anomaly_threshold = anomaly_threshold
+        self.prefer_tensorrt = prefer_tensorrt
+        self.engine_path = engine_path
+        self.use_gpu_preprocess = use_gpu_preprocess
+
+        if "cuda" in str(self.device):
+            self.mean_tensor = torch.tensor(
+                [0.485, 0.456, 0.406], device=self.device
+            ).view(1, 3, 1, 1)
+            self.std_tensor = torch.tensor(
+                [0.229, 0.224, 0.225], device=self.device
+            ).view(1, 3, 1, 1)
+        else:
+            self.mean_tensor = None
+            self.std_tensor = None
 
         self.core = FastAD(
             backbone=self.backbone_name,
@@ -86,6 +104,8 @@ class PantographFastADModel:
             global_covariance_method=self.global_covariance_method,
             regularization=self.regularization,
             pretrained_weights_path=self.pretrained_weights_path,
+            engine_path=self.engine_path,
+            prefer_tensorrt=self.prefer_tensorrt,
         )
 
         self.transform = transforms.Compose(
@@ -98,12 +118,23 @@ class PantographFastADModel:
         )
 
     def _preprocess_frame(self, frame: np.ndarray) -> torch.Tensor:
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        if (rgb.shape[0], rgb.shape[1]) != (self.input_size[1], self.input_size[0]):
-            resized = cv2.resize(rgb, self.input_size, interpolation=cv2.INTER_AREA)
+        if self.use_gpu_preprocess and torch.cuda.is_available() and "cuda" in str(self.device):
+            # GPU 硬件加速预处理 (CUDA DMA 异步上传 + 面积平均池化降采样 + 广播归一化)
+            t_frame = torch.from_numpy(frame).to(self.device, non_blocking=True)
+            # Permute (H, W, 3) -> (1, 3, H, W) 并将 BGR 转为 RGB
+            t_frame = t_frame.permute(2, 0, 1).unsqueeze(0).float()[:, [2, 1, 0]]
+            if (t_frame.shape[2], t_frame.shape[3]) != (self.input_size[1], self.input_size[0]):
+                t_resized = F.adaptive_avg_pool2d(t_frame, self.input_size)
+            else:
+                t_resized = t_frame
+            return (t_resized / 255.0 - self.mean_tensor) / self.std_tensor
         else:
-            resized = rgb
-        return self.transform(resized).unsqueeze(0)
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            if (rgb.shape[0], rgb.shape[1]) != (self.input_size[1], self.input_size[0]):
+                resized = cv2.resize(rgb, self.input_size, interpolation=cv2.INTER_AREA)
+            else:
+                resized = rgb
+            return self.transform(resized).unsqueeze(0)
 
     def fit_from_frames(
         self,
@@ -281,7 +312,14 @@ class PantographFastADModel:
         print(f"[FastAD] Saved model checkpoint to: {save_path}")
 
     @classmethod
-    def load(cls, checkpoint_path: str, device: Optional[str] = None):
+    def load(
+        cls,
+        checkpoint_path: str,
+        device: Optional[str] = None,
+        prefer_tensorrt: bool = True,
+        engine_path: Optional[str] = None,
+        use_gpu_preprocess: bool = True,
+    ):
         """
         Loads FastAD model from checkpoint.
         """
@@ -305,6 +343,9 @@ class PantographFastADModel:
             regularization=checkpoint.get("regularization", 1e-4),
             anomaly_threshold=checkpoint.get("anomaly_threshold", 2.0),
             device=device,
+            prefer_tensorrt=prefer_tensorrt,
+            engine_path=engine_path,
+            use_gpu_preprocess=use_gpu_preprocess,
         )
         if "fastad_state" in checkpoint:
             model.core.load_model_state(checkpoint["fastad_state"])

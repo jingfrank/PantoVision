@@ -30,7 +30,7 @@ class FastadForeignDetector(FastADBaseDetector):
         self.foreign_score_threshold = config.get("foreign_score_threshold", 2.2)
 
         # 使用共享模型注册表加载（同路径只加载一次 GPU 权重）
-        self.model = self._load_shared_model(model_path)
+        self.model = self._load_shared_model(model_path, config)
 
     def postprocess(self, raw_output: Any, context: Optional[DetectionContext] = None) -> DetectionResult:
         fastad_res = raw_output

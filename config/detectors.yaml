@@ -6,6 +6,7 @@ global:
   device: "cuda:0"
   fallback_device: "cpu"
   enable_shared_context: true # 开启黑板机制，跨检测器复用受电弓定位
+  prefer_tensorrt: true       # 全局优先启用 TensorRT FP16 加速引擎
 
 detectors:
   # -------------------------------------------------------------
@@ -20,6 +21,8 @@ detectors:
       panto_gate: "always"          # 升/降弓均运行 YOLO 提取受电弓框供黑板共享；降弓时内部静默大火花判定
     params:
       model_path: "models/best.pt"
+      engine_path: "models/best.engine" # TensorRT 加速引擎（存在即优先命中）
+      prefer_tensorrt: true
       conf_thresh: 0.30
       spark_area_ratio: 0.05 # 火花/受电弓面积比
       spark_min_area: 400 # 最小火花像素面积
@@ -38,6 +41,9 @@ detectors:
       panto_gate: "raised_only"     # 仅升弓（主弓受流态）激活，降弓时静默跳过
     params:
       model_path: "models/fastad_layer2_256_reg1e4_nq3_fmq1.pt"
+      engine_path: "models/fastad_layer2_256.engine"
+      prefer_tensorrt: true
+      use_gpu_preprocess: true
       grid_size: 64
       ema_decay: 0.85
       persistence_frames: 4
@@ -57,6 +63,8 @@ detectors:
       panto_gate: "raised_only"     # 仅升弓（主弓受流态）激活，降弓时静默跳过
     params:
       weights_path: "models/best_hrnet_w32_panto.pth"
+      engine_path: "models/best_hrnet_w32_panto.engine" # TensorRT 加速引擎
+      prefer_tensorrt: true
       width: 32
       num_joints: 4
       target_size: [288, 384] # HRNet 输入图像尺寸 (H, W)
@@ -94,6 +102,9 @@ detectors:
       panto_gate: "raised_only"     # 仅升弓（主弓受流态）激活，降弓时静默跳过
     params:
       model_path: "models/fastad_layer2_256_reg1e4_nq3_fmq1.pt"
+      engine_path: "models/fastad_layer2_256.engine"
+      prefer_tensorrt: true
+      use_gpu_preprocess: true
       min_defect_area: 250
       pantograph_roi_ratio: [0.15, 0.15, 0.85, 0.70]
 
@@ -110,6 +121,9 @@ detectors:
       panto_gate: "raised_only"     # 仅升弓（主弓受流态）激活，降弓时静默跳过
     params:
       model_path: "models/fastad_layer2_256_reg1e4_nq3_fmq1.pt"
+      engine_path: "models/fastad_layer2_256.engine"
+      prefer_tensorrt: true
+      use_gpu_preprocess: true
       catenary_roi_ratio: [0.25, 0.25, 0.85, 0.50]
       min_foreign_area: 100
       max_blobs_filter: 12

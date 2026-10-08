@@ -31,7 +31,7 @@ class FastadDirtDetector(FastADBaseDetector):
         self.dirt_score_thresh = config.get("dirt_score_thresh", 2.0)
 
         # 使用共享模型注册表加载（同路径只加载一次 GPU 权重）
-        self.model = self._load_shared_model(model_path)
+        self.model = self._load_shared_model(model_path, config)
 
         self.dirt_grid_history: Optional[np.ndarray] = None
         self.history_length = 0

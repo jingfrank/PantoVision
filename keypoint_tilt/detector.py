@@ -21,12 +21,18 @@ except (ImportError, ValueError):
     from keypoint_tilt.hrnet import HRNetKeypoint, decode_heatmaps
     from keypoint_tilt.tilt_analyzer import PantographTiltAnalyzer
     from keypoint_tilt.dataset import PANTOGRAPH_KEYPOINTS
+try:
+    from .trt_engine import TrtHRNetRunner
+except (ImportError, ValueError):
+    from keypoint_tilt.trt_engine import TrtHRNetRunner
 
 
 class PantographTiltDetector:
     def __init__(
         self,
         weights_path=None,
+        engine_path=None,
+        prefer_tensorrt=True,
         width=32,
         num_joints=4,
         target_size=(288, 384),
@@ -46,6 +52,10 @@ class PantographTiltDetector:
             if device is not None
             else torch.device("cuda" if torch.cuda.is_available() else "cpu")
         )
+        self.engine_path = engine_path
+        self.prefer_tensorrt = prefer_tensorrt
+        self.trt_runner = None
+        self.is_trt = False
 
         if weights_path is None:
             default_weights = os.path.join(
@@ -56,16 +66,35 @@ class PantographTiltDetector:
             if os.path.exists(default_weights):
                 weights_path = default_weights
 
-        self.model = HRNetKeypoint(num_joints=num_joints, width=width)
-        if weights_path and os.path.exists(weights_path):
-            state_dict = torch.load(weights_path, map_location=self.device)
-            self.model.load_state_dict(state_dict)
-            print(f"[Detector] Successfully loaded trained HRNet weights: {weights_path}")
-        else:
-            print("[Detector] Warning: No trained weights found. Running in uninitialized mode.")
+        # 优先探测并加载 TensorRT 引擎
+        if self.prefer_tensorrt and torch.cuda.is_available():
+            candidate_engine = self.engine_path
+            if not candidate_engine and weights_path:
+                candidate = os.path.splitext(weights_path)[0] + ".engine"
+                if os.path.exists(candidate):
+                    candidate_engine = candidate
 
-        self.model.to(self.device)
-        self.model.eval()
+            if candidate_engine and os.path.exists(candidate_engine):
+                try:
+                    self.trt_runner = TrtHRNetRunner(candidate_engine, device=str(self.device))
+                    self.is_trt = True
+                    print(f"[Detector] Successfully loaded TensorRT HRNet engine: {candidate_engine}")
+                except Exception as e:
+                    print(f"[Detector] Warning: Failed to load TensorRT engine ({e}), falling back to PyTorch.")
+                    self.trt_runner = None
+                    self.is_trt = False
+
+        # 若未启用或未命中 TensorRT，加载原生 PyTorch 权重保底
+        if not self.is_trt:
+            self.model = HRNetKeypoint(num_joints=num_joints, width=width)
+            if weights_path and os.path.exists(weights_path):
+                state_dict = torch.load(weights_path, map_location=self.device)
+                self.model.load_state_dict(state_dict)
+                print(f"[Detector] Successfully loaded trained PyTorch HRNet weights: {weights_path}")
+            else:
+                print("[Detector] Warning: No trained weights found. Running in uninitialized mode.")
+            self.model.to(self.device)
+            self.model.eval()
 
         self.analyzer = PantographTiltAnalyzer(
             structural_warning_thresh=structural_warning_thresh,
@@ -96,8 +125,11 @@ class PantographTiltDetector:
         img_tensor = ((img_tensor - mean) / std).unsqueeze(0).to(self.device)
 
         # Forward
-        with torch.no_grad():
-            heatmaps = self.model(img_tensor)
+        if self.is_trt and self.trt_runner is not None:
+            heatmaps = self.trt_runner.forward(img_tensor)
+        else:
+            with torch.no_grad():
+                heatmaps = self.model(img_tensor)
 
         preds_hm, maxvals = decode_heatmaps(heatmaps)
 

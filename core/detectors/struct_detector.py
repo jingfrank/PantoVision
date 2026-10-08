@@ -28,7 +28,7 @@ class FastadStructDetector(FastADBaseDetector):
         self.pantograph_roi_ratio = config.get("pantograph_roi_ratio", config.get("fallback_roi_ratio", [0.15, 0.15, 0.85, 0.70]))
 
         # 使用共享模型注册表加载（同路径只加载一次 GPU 权重）
-        self.model = self._load_shared_model(model_path)
+        self.model = self._load_shared_model(model_path, config)
 
     def postprocess(self, raw_output: Any, context: Optional[DetectionContext] = None) -> DetectionResult:
         fastad_res = raw_output

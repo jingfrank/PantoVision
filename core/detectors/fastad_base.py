@@ -39,7 +39,9 @@ class FastADBaseDetector(BaseDetector):
     _model_lock = threading.Lock()
     # ──────────────────────────────────────────────────────────
 
-    def _load_shared_model(self, model_path: str) -> PantographFastADModel:
+    def _load_shared_model(
+        self, model_path: str, config: Optional[Dict[str, Any]] = None
+    ) -> PantographFastADModel:
         """
         从类级注册表加载或复用 FastAD 模型实例。
         同一 model_path 只会执行一次 PantographFastADModel.load()，
@@ -48,11 +50,18 @@ class FastADBaseDetector(BaseDetector):
         abs_path = os.path.abspath(model_path)
         with self._model_lock:
             if abs_path not in self._shared_models:
+                cfg = config or {}
+                prefer_trt = cfg.get("prefer_tensorrt", True)
+                engine_path = cfg.get("engine_path", None)
+                use_gpu_preproc = cfg.get("use_gpu_preprocess", True)
                 logger.info(
-                    f"[{self.name}] 首次加载 FastAD 共享模型: {model_path}"
+                    f"[{self.name}] 首次加载 FastAD 共享模型: {model_path} (prefer_trt={prefer_trt}, gpu_preproc={use_gpu_preproc})"
                 )
                 self._shared_models[abs_path] = PantographFastADModel.load(
-                    model_path
+                    model_path,
+                    prefer_tensorrt=prefer_trt,
+                    engine_path=engine_path,
+                    use_gpu_preprocess=use_gpu_preproc,
                 )
                 logger.info(f"[{self.name}] FastAD 共享模型加载成功")
             else:

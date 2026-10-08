@@ -23,6 +23,8 @@ class HrnetTiltDetector(BaseDetector):
 
     def initialize(self, config: Dict[str, Any]) -> None:
         weights_path = config.get("weights_path", "models/best_hrnet_w32_panto.pth")
+        engine_path = config.get("engine_path", None)
+        prefer_trt = config.get("prefer_tensorrt", True)
         width = config.get("width", 32)
         target_size = tuple(config.get("target_size", (288, 384)))
         heatmap_size = tuple(config.get("heatmap_size", (72, 96)))
@@ -30,9 +32,14 @@ class HrnetTiltDetector(BaseDetector):
         alarm_thresh = config.get("structural_alarm_thresh", 1.8)
         install_bias = config.get("install_bias_deg", 0.0)
 
-        logger.info(f"[{self.name}] 正在加载 HRNet 权重: {weights_path} (width={width}, target_size={target_size}, heatmap_size={heatmap_size}) ...")
+        logger.info(
+            f"[{self.name}] 正在初始化 HRNet 倾斜检测器 (weights={weights_path}, "
+            f"engine={engine_path}, prefer_trt={prefer_trt}) ..."
+        )
         self.detector = PantographTiltDetector(
             weights_path=weights_path,
+            engine_path=engine_path,
+            prefer_tensorrt=prefer_trt,
             width=width,
             num_joints=4,
             target_size=target_size,
@@ -41,7 +48,12 @@ class HrnetTiltDetector(BaseDetector):
             structural_alarm_thresh=alarm_thresh,
             install_bias_deg=install_bias,
         )
-        logger.info(f"[{self.name}] HRNet 倾斜检测器加载成功 (门限: 预警={warning_thresh}°, 告警={alarm_thresh}°)")
+        self.is_trt = getattr(self.detector, "is_trt", False)
+        backend_str = "TensorRT FP16" if self.is_trt else "PyTorch"
+        logger.info(
+            f"[{self.name}] HRNet 倾斜检测器初始化成功 [后端: {backend_str}] "
+            f"(门限: 预警={warning_thresh}°, 告警={alarm_thresh}°)"
+        )
 
     def preprocess(self, image: Any, context: Optional[DetectionContext] = None) -> Any:
         return image

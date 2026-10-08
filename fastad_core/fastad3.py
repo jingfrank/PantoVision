@@ -26,7 +26,9 @@ class FastAD(nn.Module):
         patch_covariance_method:str,
         global_covariance_method:str,
         regularization,
-        pretrained_weights_path):
+        pretrained_weights_path,
+        engine_path=None,
+        prefer_tensorrt=True):
         super(FastAD, self).__init__()
         self.backbone = backbone
         self.layer_to_extract = layer_to_extract
@@ -46,7 +48,17 @@ class FastAD(nn.Module):
         self.global_covariance_method = global_covariance_method
         self.regularization = regularization
         self.pretrained_weights_path = pretrained_weights_path
-        self.feature_extractor = FeatureExtractor(backbone, self.layer_to_extract, device,pretrained_weights_path,use_fp16 = True)
+        self.engine_path = engine_path
+        self.prefer_tensorrt = prefer_tensorrt
+        self.feature_extractor = FeatureExtractor(
+            backbone,
+            self.layer_to_extract,
+            device,
+            pretrained_weights_path,
+            use_fp16=True,
+            engine_path=self.engine_path,
+            prefer_tensorrt=self.prefer_tensorrt,
+        )
         self.patch_extractor = PatchExtractor(patchsize, stride)
         
         self.global_estimators = nn.ModuleList()

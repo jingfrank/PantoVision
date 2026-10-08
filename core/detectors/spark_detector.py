@@ -5,6 +5,7 @@ YOLO-based Big Spark Detector Plugin.
 Implements BaseDetector for high-speed (30 FPS) pantograph arc discharge detection.
 """
 
+import os
 from typing import Any, Optional, Dict, List
 import numpy as np
 import logging
@@ -25,14 +26,38 @@ class YoloSparkDetector(BaseDetector):
 
     def initialize(self, config: Dict[str, Any]) -> None:
         model_path = config.get("model_path", "models/best.pt")
+        engine_path = config.get("engine_path", None)
+        prefer_trt = config.get("prefer_tensorrt", True)
         self.conf_thresh = config.get("conf_thresh", 0.30)
         self.spark_area_ratio = config.get("spark_area_ratio", 0.05)
         self.spark_min_area = config.get("spark_min_area", 400)
         self.spark_duration_frames = config.get("spark_duration_frames", 12)  # ~500-700ms at 25fps
 
-        logger.info(f"[{self.name}] 正在加载 YOLO 权重: {model_path} ...")
-        self.model = YOLO(model_path)
-        logger.info(f"[{self.name}] YOLO 加载成功, 类别: {self.model.names}")
+        # 优先探测并加载 TensorRT 引擎
+        self.is_trt = False
+        if prefer_trt:
+            candidate_engine = engine_path
+            if not candidate_engine and model_path:
+                candidate = os.path.splitext(model_path)[0] + ".engine"
+                if os.path.exists(candidate):
+                    candidate_engine = candidate
+
+            if candidate_engine and os.path.exists(candidate_engine):
+                try:
+                    logger.info(f"[{self.name}] 命中 TensorRT 加速引擎: {candidate_engine}")
+                    self.model = YOLO(candidate_engine, task="detect")
+                    self.is_trt = True
+                    logger.info(f"[{self.name}] YOLO TensorRT 引擎加载成功, 类别: {self.model.names}")
+                except Exception as e:
+                    logger.warning(
+                        f"[{self.name}] 加载 TensorRT 引擎失败 ({e})，将平滑回退至 PyTorch 权重: {model_path}"
+                    )
+                    self.is_trt = False
+
+        if not self.is_trt:
+            logger.info(f"[{self.name}] 正在加载 YOLO PyTorch 权重: {model_path} ...")
+            self.model = YOLO(model_path)
+            logger.info(f"[{self.name}] YOLO PyTorch 模型加载成功, 类别: {self.model.names}")
 
         self.current_duration_count = 0
         self.alarmed = False
