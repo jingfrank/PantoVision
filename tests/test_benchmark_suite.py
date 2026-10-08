@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 弓网多算法分层检测体系 - 典型视频离线基准评测套件 (test_benchmark_suite.py)
-对 ./弓网典型视频/ 目录下的所有工况视频运行统一检测调度层与融合引擎，
-验证 6 大类故障（火花、脏污、倾斜、飘弓、异物、结构异常）的识别准确率与推理时延。
+对 ./弓网典型视频/ 或客户误报视频目录下的所有工况视频运行统一检测调度层与融合引擎，
+验证 6 大类故障（火花、脏污、倾斜、飘弓、异物、结构异常）的识别准确率、误报抑制率与推理时延。
 """
 
 import os
@@ -11,9 +11,13 @@ import sys
 import time
 import argparse
 import glob
+import json
+import csv
+import pathlib
+from collections import defaultdict
 import cv2
 import numpy as np
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if BASE_DIR not in sys.path:
@@ -27,6 +31,78 @@ from core.scheduler import DetectionScheduler
 from core.fusion import FusionEngine, FAULT_NAME_MAP
 from core.output import Visualizer
 
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+VIDEO_EXTS = {".mp4", ".avi", ".mkv", ".mov", ".flv"}
+
+FASTAD_FAULT_TYPES = {"dirty", "foreign_object", "structure_abnormal"}
+
+FAULT_CN_MAP_SIMPLE = {
+    "dirty": "画面脏污",
+    "foreign_object": "悬挂异物",
+    "structure_abnormal": "受电弓结构异常",
+}
+
+
+def _render_fastad_diag_img(
+    frame: np.ndarray,
+    fastad_result: dict,
+    fault_type: str,
+    score: float,
+    alpha: float = 0.40,
+    vmax: float = 4.0,
+) -> np.ndarray:
+    """
+    [仅测试与离线评测启用] 将 FastAD 推理结果中的 anomaly_map 与原帧透明叠加，
+    并拼接顶部诊断 header 条与缺陷候选框。
+
+    注意：anomaly_map 已由 PantographFastADModel.predict() 内部 resize
+    至原图分辨率，此处无需再次 resize（仅作保险尺寸检查）。
+    """
+    h, w = frame.shape[:2]
+    anomaly_map = fastad_result.get("anomaly_map")
+    if anomaly_map is None:
+        return frame
+
+    bboxes = fastad_result.get("bboxes", [])
+    threshold = fastad_result.get("image_threshold", 1.0)
+
+    # 保险尺寸检查
+    if anomaly_map.shape[:2] != (h, w):
+        anomaly_map = cv2.resize(anomaly_map, (w, h), interpolation=cv2.INTER_LINEAR)
+
+    # 伪彩色热图透明混合 (与 model.generate_overlay 逻辑保持一致)
+    norm_map = np.clip(anomaly_map / (vmax + 1e-8), 0.0, 1.0)
+    heatmap_u8 = (norm_map * 255.0).astype(np.uint8)
+    colored_heatmap = cv2.applyColorMap(heatmap_u8, cv2.COLORMAP_JET)
+    blended = cv2.addWeighted(frame, 1.0 - alpha, colored_heatmap, alpha, 0)
+
+    # 绘制缺陷候选框（红色，由 binary_mask 轮廓提取）
+    for b in bboxes:
+        bx1, by1, bx2, by2 = [int(v) for v in b]
+        cv2.rectangle(blended, (bx1, by1), (bx2, by2), (0, 0, 255), 3, cv2.LINE_AA)
+
+    # 顶部工业诊断条（深灰背景，青色文字）
+    header_h = 52
+    header = np.zeros((header_h, w, 3), dtype=np.uint8)
+    header[:] = (30, 30, 30)
+    cn_name = FAULT_CN_MAP_SIMPLE.get(fault_type, FAULT_NAME_MAP.get(fault_type, fault_type))
+    label = f"FastAD Diag | {cn_name} | Score: {score:.3f} (Thr: {threshold:.3f})"
+    cv2.putText(
+        header, label, (16, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.82,
+        (0, 255, 255), 2, cv2.LINE_AA
+    )
+
+    return np.vstack([header, blended])
+
+
+def collect_videos_recursive(base_dir: str) -> List[str]:
+    """递归扫描目录，收集所有视频文件（大小写扩展名兼容）"""
+    root = pathlib.Path(base_dir)
+    return sorted(
+        str(p) for p in root.rglob("*")
+        if p.is_file() and p.suffix.lower() in VIDEO_EXTS
+    )
+
 
 def evaluate_video(
     video_path: str,
@@ -37,14 +113,16 @@ def evaluate_video(
     start_frame: int = 0,
     max_frames: int = 0,
     stride: int = 1,
-    save_snapshots: bool = True
+    save_snapshots: bool = True,
+    save_fastad_overlay: bool = False,
+    category: str = "DEFAULT",
 ) -> Dict[str, Any]:
     """单视频离线评测"""
     video_name = os.path.basename(video_path)
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         print(f"[ERROR] 无法打开视频: {video_path}")
-        return {"error": "cannot open video"}
+        return {"error": "cannot open video", "video": video_name, "video_path": video_path}
 
     if start_frame > 0:
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
@@ -56,7 +134,7 @@ def evaluate_video(
 
     target_frames = total_frames if max_frames <= 0 else min(total_frames, max_frames)
     print(f"\n========================================================")
-    print(f"▶ 正在测试视频: {video_name}")
+    print(f"▶ 正在测试视频: {video_name} (类别: {category})")
     print(f"  分辨率: {width}x{height} | 帧率: {fps:.1f} FPS | 目标总帧: {target_frames} (采样步长: {stride})")
     print(f"========================================================")
 
@@ -105,9 +183,10 @@ def evaluate_video(
                 train_id="CR400BF"
             )
 
-            # 1. 调度层沙箱安全分发
+            # 1. 调度层沙箱安全分发 (注入 DetectionContext 保证黑板共享与推理缓存机制正常运转)
+            context = DetectionContext(packet=packet)
             t0 = time.time()
-            raw_results = scheduler.dispatch(packet)
+            raw_results = scheduler.dispatch(packet, context=context)
             
             # 2. 融合层综合决策
             fusion_res = fusion.decide(raw_results, packet)
@@ -143,6 +222,29 @@ def evaluate_video(
                         snap_path = os.path.join(save_subdir, snap_name)
                         cv2.imwrite(snap_path, hud_img)
 
+                    # [仅测试启用] 若为 FastAD 检测的故障类型且启用了 --save-fastad-overlay，保存透明叠加异常热图
+                    if save_fastad_overlay and f_type in FASTAD_FAULT_TYPES:
+                        fastad_result = None
+                        for key, val in context.shared_data.items():
+                            if key.startswith("fastad_result:") and isinstance(val, dict) and "anomaly_map" in val:
+                                fastad_result = val
+                                break
+
+                        if fastad_result is not None:
+                            overlay_dir = os.path.join(save_subdir, "fastad_overlays")
+                            os.makedirs(overlay_dir, exist_ok=True)
+                            overlay_img = _render_fastad_diag_img(
+                                frame=frame,
+                                fastad_result=fastad_result,
+                                fault_type=f_type,
+                                score=fusion_res.overall_score,
+                            )
+                            overlay_path = os.path.join(
+                                overlay_dir, f"fastad_f{frame_idx:05d}_{pts:06.1f}s_{f_type}.jpg"
+                            )
+                            cv2.imwrite(overlay_path, overlay_img)
+                            print(f"    💾 [FastAD诊断热图已保存] {os.path.basename(overlay_path)}")
+
             last_active_set = set(current_active)
 
             if processed_count % 30 == 0 or processed_count == 1:
@@ -166,12 +268,15 @@ def evaluate_video(
 
     return {
         "video": video_name,
+        "video_path": video_path,
+        "category": category,
         "total_frames": total_frames,
         "processed_frames": processed_count,
         "avg_latency_ms": round(avg_latency, 2),
         "p95_latency_ms": round(p95_latency, 2),
         "fps": round(fps_measured, 1),
         "fault_counts": fault_counts,
+        "has_alarm": bool(len(alarm_events) > 0),
         "first_trigger": first_trigger_frame,
         "alarm_events": alarm_events,
     }
@@ -183,7 +288,8 @@ def evaluate_image(
     fusion: FusionEngine,
     visualizer: Visualizer,
     output_dir: str,
-    save_snapshot: bool = True
+    save_snapshot: bool = True,
+    save_fastad_overlay: bool = False,
 ) -> Dict[str, Any]:
     """单张图片静态离线评测与诊断"""
     img_name = os.path.basename(image_path)
@@ -263,6 +369,30 @@ def evaluate_image(
         print("-" * 75)
         print(f"📸 诊断标注图已保存至: {snap_path}")
 
+    # [仅测试启用] 单张图片 FastAD 热图透明叠加
+    if save_fastad_overlay and fusion_res.has_fault:
+        for f_dict in fusion_res.active_alarms:
+            ft = f_dict["fault_type"]
+            if ft in FASTAD_FAULT_TYPES:
+                fastad_result = None
+                for key, val in context.shared_data.items():
+                    if key.startswith("fastad_result:") and isinstance(val, dict) and "anomaly_map" in val:
+                        fastad_result = val
+                        break
+                if fastad_result is not None:
+                    save_dir = os.path.join(output_dir, "fastad_overlays")
+                    os.makedirs(save_dir, exist_ok=True)
+                    overlay_img = _render_fastad_diag_img(
+                        frame=img,
+                        fastad_result=fastad_result,
+                        fault_type=ft,
+                        score=fusion_res.overall_score,
+                    )
+                    diag_path = os.path.join(save_dir, f"fastad_eval_{img_name}")
+                    cv2.imwrite(diag_path, overlay_img)
+                    print(f"📸 FastAD 热图诊断图已保存至: {diag_path}")
+                break
+
     return {
         "image": img_name,
         "primary_fault": fusion_res.primary_fault,
@@ -272,10 +402,6 @@ def evaluate_image(
         "active_alarms": fusion_res.active_alarms,
         "snapshot_path": snap_path,
     }
-
-
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
-VIDEO_EXTS = {".mp4", ".avi", ".mkv", ".mov", ".flv"}
 
 
 def main():
@@ -290,6 +416,13 @@ def main():
     parser.add_argument("--max-frames", type=int, default=0, help="视频最多评测帧数 (0为全部)")
     parser.add_argument("--stride", type=int, default=1, help="抽帧步长 (1为逐帧)")
     parser.add_argument("--output-dir", type=str, default="local_cache/benchmark_results", help="结果抓拍保存目录")
+    parser.add_argument("--recursive", action="store_true", help="递归扫描子目录中的视频文件（适用于类别/车型/视频.MP4 三层结构）")
+    parser.add_argument("--save-fastad-overlay", action="store_true", help="[测试专用] 告警帧保存 FastAD 热图透明叠加诊断图")
+    parser.add_argument("--sample-per-category", type=int, default=0, help="每个场景类别抽样 N 个视频（0 为全量）")
+    parser.add_argument("--manifest-json", type=str, default=None, help="输入或输出的数据集 Manifest JSON 路径")
+    parser.add_argument("--export-report-csv", type=str, default=None, help="导出逐视频指标汇总 CSV 路径")
+    parser.add_argument("--disable", "--disable-detectors", type=str, default=None, help="指定停用的检测器列表，逗号分隔 (如: --disable dirt,tilt)")
+    parser.add_argument("--detectors", "--only", type=str, default=None, help="仅启用的检测器列表，逗号分隔 (如: --detectors spark,tilt)")
     args = parser.parse_args()
 
     cfg_path = os.path.join(BASE_DIR, args.config) if not os.path.isabs(args.config) else args.config
@@ -300,9 +433,28 @@ def main():
     print(" 🚀 初始化弓网分层检测调度引擎")
     print(f" 配置文件: {cfg_path}")
     print(f" 结果目录: {out_dir}")
+    print(f" FastAD热图透明叠加: {'已启用 (测试模式)' if args.save_fastad_overlay else '未启用'}")
     print("========================================================")
 
     scheduler = DetectionScheduler(cfg_path)
+
+    # 动态应用命令行启停参数
+    if args.detectors:
+        target_set = set(d.strip() for d in args.detectors.split(",") if d.strip())
+        for name in list(scheduler.detector_map.keys()):
+            scheduler.set_enabled(name, name in target_set)
+    elif args.disable:
+        disabled_set = set(d.strip() for d in args.disable.split(",") if d.strip())
+        for name in disabled_set:
+            if not scheduler.set_enabled(name, False):
+                print(f"[WARN] 未找到指定停用的检测器: {name} (当前可用: {list(scheduler.detector_map.keys())})")
+
+    active_dets = [d.name for d in scheduler.detectors if d.enabled]
+    inactive_dets = [d.name for d in scheduler.detectors if not d.enabled]
+    print(f" 当前启用检测器 ({len(active_dets)}): {', '.join(active_dets) if active_dets else '全部已禁用'}")
+    if inactive_dets:
+        print(f" 当前停用检测器 ({len(inactive_dets)}): {', '.join(inactive_dets)}")
+
     fusion = FusionEngine()
     visualizer = Visualizer()
 
@@ -322,14 +474,14 @@ def main():
             scheduler=scheduler,
             fusion=fusion,
             visualizer=visualizer,
-            output_dir=out_dir
+            output_dir=out_dir,
+            save_fastad_overlay=args.save_fastad_overlay,
         )
         return
 
     # 2. 判断是否为图片目录批量评测
     img_dir_path = args.image_dir
     if not img_dir_path and args.input and os.path.isdir(args.input):
-        # 检查目录下是否主要是图片
         imgs_in_dir = [f for f in os.listdir(args.input) if os.path.splitext(f)[1].lower() in IMAGE_EXTS]
         if imgs_in_dir:
             img_dir_path = args.input
@@ -348,7 +500,8 @@ def main():
                 scheduler=scheduler,
                 fusion=fusion,
                 visualizer=visualizer,
-                output_dir=out_dir
+                output_dir=out_dir,
+                save_fastad_overlay=args.save_fastad_overlay,
             )
             img_results.append(res)
 
@@ -370,6 +523,7 @@ def main():
         return
 
     # 3. 视频评测逻辑
+    vdir = None
     if args.video:
         video_list = [args.video]
     elif args.input and os.path.isfile(args.input):
@@ -377,12 +531,49 @@ def main():
     else:
         vdir_name = args.dir or "弓网典型视频"
         vdir = os.path.join(BASE_DIR, vdir_name) if not os.path.isabs(vdir_name) else vdir_name
-        video_list = sorted(glob.glob(os.path.join(vdir, "*.mp4")))
+        if args.recursive:
+            video_list = collect_videos_recursive(vdir)
+            print(f"[INFO] 递归扫描找到 {len(video_list)} 个视频文件")
+        else:
+            video_list = sorted([
+                str(p) for p in pathlib.Path(vdir).iterdir()
+                if p.is_file() and p.suffix.lower() in VIDEO_EXTS
+            ])
+
+    # 抽样处理 (如果指定 --sample-per-category)
+    if args.sample_per_category > 0 and len(video_list) > 1:
+        cat_map = defaultdict(list)
+        for vp in video_list:
+            p = pathlib.Path(vp)
+            if vdir and p.is_relative_to(pathlib.Path(vdir)):
+                rel_parts = p.relative_to(pathlib.Path(vdir)).parts
+                cat = rel_parts[0] if len(rel_parts) > 1 else "DEFAULT"
+            else:
+                cat = p.parent.name
+            cat_map[cat].append(vp)
+
+        sampled_list = []
+        print(f"\n--- 执行类别抽样 (每类最多 {args.sample_per_category} 个) ---")
+        for cat, vids in sorted(cat_map.items()):
+            selected = vids[:args.sample_per_category]
+            sampled_list.extend(selected)
+            print(f"  类别 【{cat}】: 现有 {len(vids)} 个 → 抽样 {len(selected)} 个")
+        video_list = sampled_list
+        print(f"[INFO] 抽样完成，本次评测视频总数: {len(video_list)}\n")
 
     all_results = []
     for vpath in video_list:
         if vpath.endswith(".bak"):
             continue
+
+        # 解析所属类别
+        p = pathlib.Path(vpath)
+        if vdir and p.is_relative_to(pathlib.Path(vdir)):
+            rel_parts = p.relative_to(pathlib.Path(vdir)).parts
+            category = rel_parts[0] if len(rel_parts) > 1 else "DEFAULT"
+        else:
+            category = p.parent.name
+
         res = evaluate_video(
             video_path=vpath,
             scheduler=scheduler,
@@ -392,29 +583,118 @@ def main():
             start_frame=args.start_frame,
             max_frames=args.max_frames,
             stride=args.stride,
+            save_snapshots=True,
+            save_fastad_overlay=args.save_fastad_overlay,
+            category=category,
         )
         all_results.append(res)
 
-    # 打印最终视频对比大表
-    print("\n" + "=" * 80)
-    print(" 📊 全场景基准离线评测最终汇总大表")
-    print("=" * 80)
-    print(f"{'视频文件名':<18} | {'帧数':<6} | {'FPS':<6} | {'均延(ms)':<8} | {'P95(ms)':<8} | {'检出故障类别与次数'}")
-    print("-" * 80)
-    for r in all_results:
-        if "error" in r:
-            continue
+    # ── 4. 统计汇总大表输出 ───────────────────────────────────
+    valid_results = [r for r in all_results if "error" not in r]
+    total_videos = len(valid_results)
+    alarm_videos = sum(1 for r in valid_results if r.get("has_alarm", False))
+    suppressed_videos = total_videos - alarm_videos
+    fasr = (suppressed_videos / total_videos * 100.0) if total_videos > 0 else 0.0
+
+    print("\n" + "=" * 90)
+    print(" 📊 全场景基准离线评测逐视频汇总明细")
+    print("=" * 90)
+    print(f"{'视频文件名':<22} | {'场景类别':<15} | {'帧数':<6} | {'FPS':<6} | {'均延(ms)':<8} | {'告警判定':<8} | {'检出故障'}")
+    print("-" * 90)
+    for r in valid_results:
         vname = r["video"]
+        cat = r.get("category", "DEFAULT")
         n_f = r["processed_frames"]
         m_fps = r["fps"]
         avg_l = r["avg_latency_ms"]
-        p95_l = r["p95_latency_ms"]
+        status_str = "🚨 有告警" if r.get("has_alarm") else "🛡️ 正常(无误报)"
         active = [f"{FAULT_NAME_MAP.get(k, k)}:{v}" for k, v in r["fault_counts"].items() if v > 0]
-        active_str = ", ".join(active) if active else "无告警(正常)"
-        print(f"{vname:<18} | {n_f:<6} | {m_fps:<6.1f} | {avg_l:<8.1f} | {p95_l:<8.1f} | {active_str}")
+        active_str = ", ".join(active) if active else "-"
+        print(f"{vname:<22} | {cat:<15} | {n_f:<6} | {m_fps:<6.1f} | {avg_l:<8.1f} | {status_str:<8} | {active_str}")
+    print("=" * 90)
+
+    # 分类别统计
+    cat_summary = defaultdict(lambda: {"total": 0, "alarms": 0, "latencies": [], "fps": []})
+    for r in valid_results:
+        cat = r.get("category", "DEFAULT")
+        cat_summary[cat]["total"] += 1
+        if r.get("has_alarm"):
+            cat_summary[cat]["alarms"] += 1
+        cat_summary[cat]["latencies"].append(r["avg_latency_ms"])
+        cat_summary[cat]["fps"].append(r["fps"])
+
+    print("\n" + "=" * 80)
+    print(" 📈 分场景类别误报抑制率与性能收益 (FASR Breakdown)")
+    print("=" * 80)
+    print(f"{'场景类别':<22} | {'评测数':<6} | {'告警数':<6} | {'无误报数':<6} | {'误报抑制率(FASR)':<16} | {'平均FPS'}")
+    print("-" * 80)
+    for cat, info in sorted(cat_summary.items()):
+        c_tot = info["total"]
+        c_alr = info["alarms"]
+        c_sup = c_tot - c_alr
+        c_fasr = (c_sup / c_tot * 100.0) if c_tot > 0 else 0.0
+        c_fps = np.mean(info["fps"]) if info["fps"] else 0.0
+        print(f"{cat:<22} | {c_tot:<6} | {c_alr:<6} | {c_sup:<6} | {c_fasr:>14.1f}% | {c_fps:>6.1f}")
+    print("-" * 80)
+    print(f"【总体统计】 评测视频: {total_videos} 个 | 告警触发: {alarm_videos} 个 | 成功抑制虚警: {suppressed_videos} 个")
+    print(f"【核心指标】 总体误报抑制率 (Overall FASR): {fasr:.2f}%")
     print("=" * 80 + "\n")
+
+    # 导出逐视频 CSV
+    if args.export_report_csv:
+        csv_path = pathlib.Path(args.export_report_csv).resolve()
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:
+            fieldnames = [
+                "video", "category", "video_path", "total_frames",
+                "processed_frames", "fps", "avg_latency_ms", "p95_latency_ms",
+                "has_alarm", "alarm_faults", "alarm_count"
+            ]
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for r in valid_results:
+                alr_faults = [FAULT_NAME_MAP.get(k, k) for k, v in r["fault_counts"].items() if v > 0]
+                alr_cnt = sum(r["fault_counts"].values())
+                writer.writerow({
+                    "video": r["video"],
+                    "category": r.get("category", "DEFAULT"),
+                    "video_path": r.get("video_path", ""),
+                    "total_frames": r["total_frames"],
+                    "processed_frames": r["processed_frames"],
+                    "fps": r["fps"],
+                    "avg_latency_ms": r["avg_latency_ms"],
+                    "p95_latency_ms": r["p95_latency_ms"],
+                    "has_alarm": r.get("has_alarm", False),
+                    "alarm_faults": ";".join(alr_faults),
+                    "alarm_count": alr_cnt,
+                })
+        print(f"📄 逐视频离线评测报表已导出至: {csv_path}")
+
+    # 回填 Manifest JSON (若指定)
+    if args.manifest_json and os.path.isfile(args.manifest_json):
+        try:
+            with open(args.manifest_json, "r", encoding="utf-8") as f:
+                manifest_records = json.load(f)
+
+            res_map = {r["video_path"]: r for r in valid_results}
+            res_map_name = {r["video"]: r for r in valid_results}
+
+            updated_cnt = 0
+            for item in manifest_records:
+                match_r = res_map.get(item.get("file_path")) or res_map_name.get(item.get("filename"))
+                if match_r:
+                    item["our_alarm"] = match_r.get("has_alarm", False)
+                    item["our_fault_types"] = [
+                        k for k, v in match_r["fault_counts"].items() if v > 0
+                    ]
+                    updated_cnt += 1
+
+            with open(args.manifest_json, "w", encoding="utf-8") as f:
+                json.dump(manifest_records, f, ensure_ascii=False, indent=2)
+            print(f"📝 已同步更新 Manifest 清单中 {updated_cnt} 个视频的评测状态: {args.manifest_json}")
+        except Exception as e:
+            print(f"[WARN] 更新 Manifest 文件失败: {e}")
 
 
 if __name__ == "__main__":
     main()
-
