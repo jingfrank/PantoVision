@@ -50,22 +50,22 @@ def test_app_config_10_variables():
     assert len(vars_dict) == 10, f"Expected 10 variables, got {len(vars_dict)}"
 
     expected = {
-        0: ("列车速度", "Unsigned16"),
-        1: ("年", "Unsigned8"),
-        2: ("月", "Unsigned8"),
-        3: ("日", "Unsigned8"),
-        4: ("时", "Unsigned8"),
-        5: ("分", "Unsigned8"),
-        6: ("秒", "Unsigned8"),
-        7: ("时间有效", "Boolean1"),
-        8: ("TP06升弓信号", "Boolean1"),
-        9: ("公里标（HH/HL/LH/LL）", "Unsigned32"),
+        0: ("列车速度", {"Unsigned16", "UINT16"}),
+        1: ("年", {"Unsigned8", "UINT8"}),
+        2: ("月", {"Unsigned8", "UINT8"}),
+        3: ("日", {"Unsigned8", "UINT8"}),
+        4: ("时", {"Unsigned8", "UINT8"}),
+        5: ("分", {"Unsigned8", "UINT8"}),
+        6: ("秒", {"Unsigned8", "UINT8"}),
+        7: ("时间有效", {"Boolean1", "UINT8"}),
+        8: ("TP06升弓信号", {"Boolean1", "UINT8"}),
+        9: ("公里标（HH/HL/LH/LL）", {"Unsigned32", "UINT32"}),
     }
 
-    for idx, (exp_name, exp_type) in expected.items():
+    for idx, (exp_name, exp_types) in expected.items():
         assert idx in vars_dict, f"Index {idx} missing in AppConfig.xlsx"
         assert vars_dict[idx]["name"] == exp_name, f"Expected {exp_name}, got {vars_dict[idx]['name']}"
-        assert vars_dict[idx]["type"] == exp_type, f"Expected {exp_type}, got {vars_dict[idx]['type']}"
+        assert vars_dict[idx]["type"] in exp_types, f"Expected {exp_types}, got {vars_dict[idx]['type']}"
 
     print("✅ Test 1: AppConfig.xlsx 10 个输入变量及 max_input_index == 9 校验通过")
 

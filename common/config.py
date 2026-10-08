@@ -51,7 +51,7 @@ def _load_excel_with_openpyxl(app_config_path, algo_id):
     from openpyxl import load_workbook
 
     wb = load_workbook(app_config_path, data_only=True)
-    ws = wb.active
+    ws = wb["Sheet1"] if "Sheet1" in wb.sheetnames else wb.active
     rows = []
     version_text = "1.0.0"
     for r in range(1, ws.max_row + 1):
@@ -113,7 +113,7 @@ def load_input_variables_from_app_config(app_config_path):
     try:
         from openpyxl import load_workbook
         wb = load_workbook(app_config_path, data_only=True)
-        ws = wb.active
+        ws = wb["Sheet1"] if "Sheet1" in wb.sheetnames else wb.active
         inputs = {}
         for r in range(1, ws.max_row + 1):
             row = [ws.cell(r, c).value for c in range(1, ws.max_column + 1)]
