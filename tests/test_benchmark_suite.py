@@ -685,10 +685,8 @@ def main():
                 if match_r:
                     item["our_alarm"] = match_r.get("has_alarm", False)
                     item["our_fault_types"] = [
-                        k for k, v in match_r["fault_counts"].items() if v > 0
+                        FAULT_NAME_MAP.get(k, k) for k, v in match_r["fault_counts"].items() if v > 0
                     ]
-                    if item.get("review_status") == "UNVERIFIED":
-                        item["review_status"] = "AUTO_SCREENED"
                     updated_cnt += 1
 
             with open(args.manifest_json, "w", encoding="utf-8") as f:
@@ -706,7 +704,39 @@ def main():
                             r_copy["our_fault_types"] = ";".join(r_copy["our_fault_types"])
                         writer.writerow(r_copy)
 
-            print(f"📝 已同步更新 Manifest (JSON & CSV) 中 {updated_cnt} 个视频的评测状态: {args.manifest_json}")
+            # 同步写回对应的 Excel 文件 (保留下拉框与原有单元格样式)
+            manifest_xlsx = pathlib.Path(args.manifest_json).with_suffix(".xlsx")
+            if manifest_xlsx.exists():
+                try:
+                    import openpyxl
+                    wb = openpyxl.load_workbook(manifest_xlsx)
+                    ws = wb.active
+                    header_row = [cell.value for cell in ws[1]]
+                    col_map = {val: idx for idx, val in enumerate(header_row, 1) if val}
+
+                    if "our_alarm" in col_map and "our_fault_types" in col_map:
+                        fn_col = col_map.get("filename")
+                        fp_col = col_map.get("file_path")
+                        alarm_col = col_map["our_alarm"]
+                        fault_col = col_map["our_fault_types"]
+
+                        for row_i in range(2, ws.max_row + 1):
+                            fn_val = ws.cell(row=row_i, column=fn_col).value if fn_col else None
+                            fp_val = ws.cell(row=row_i, column=fp_col).value if fp_col else None
+                            match_r = res_map.get(fp_val) or res_map_name.get(fn_val)
+                            if match_r:
+                                has_alr = match_r.get("has_alarm", False)
+                                alr_faults = [
+                                    FAULT_NAME_MAP.get(k, k) for k, v in match_r["fault_counts"].items() if v > 0
+                                ]
+                                ws.cell(row=row_i, column=alarm_col, value=str(has_alr))
+                                ws.cell(row=row_i, column=fault_col, value=";".join(alr_faults))
+
+                        wb.save(manifest_xlsx)
+                except Exception as ex:
+                    print(f"[WARN] 同步更新 Manifest Excel 失败: {ex}")
+
+            print(f"📝 已同步更新 Manifest (JSON, CSV & Excel) 中 {updated_cnt} 个视频的评测状态: {args.manifest_json}")
         except Exception as e:
             print(f"[WARN] 更新 Manifest 文件失败: {e}")
 
