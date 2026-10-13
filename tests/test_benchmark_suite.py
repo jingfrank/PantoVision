@@ -687,11 +687,26 @@ def main():
                     item["our_fault_types"] = [
                         k for k, v in match_r["fault_counts"].items() if v > 0
                     ]
+                    if item.get("review_status") == "UNVERIFIED":
+                        item["review_status"] = "AUTO_SCREENED"
                     updated_cnt += 1
 
             with open(args.manifest_json, "w", encoding="utf-8") as f:
                 json.dump(manifest_records, f, ensure_ascii=False, indent=2)
-            print(f"📝 已同步更新 Manifest 清单中 {updated_cnt} 个视频的评测状态: {args.manifest_json}")
+
+            # 同步写回对应的 CSV 文件 (支持 Excel 直接打开查看评测回填)
+            manifest_csv = pathlib.Path(args.manifest_json).with_suffix(".csv")
+            if manifest_records:
+                with open(manifest_csv, "w", encoding="utf-8-sig", newline="") as f:
+                    writer = csv.DictWriter(f, fieldnames=list(manifest_records[0].keys()))
+                    writer.writeheader()
+                    for r in manifest_records:
+                        r_copy = dict(r)
+                        if isinstance(r_copy.get("our_fault_types"), list):
+                            r_copy["our_fault_types"] = ";".join(r_copy["our_fault_types"])
+                        writer.writerow(r_copy)
+
+            print(f"📝 已同步更新 Manifest (JSON & CSV) 中 {updated_cnt} 个视频的评测状态: {args.manifest_json}")
         except Exception as e:
             print(f"[WARN] 更新 Manifest 文件失败: {e}")
 
