@@ -28,6 +28,8 @@ class FastadForeignDetector(FastADBaseDetector):
         self.min_foreign_area = config.get("min_foreign_area", 100)
         self.max_blobs_filter = config.get("max_blobs_filter", 12)
         self.foreign_score_threshold = config.get("foreign_score_threshold", 2.2)
+        self.pixel_threshold = config.get("pixel_threshold", None)
+        self.img_threshold = config.get("img_threshold", None)
 
         # 使用共享模型注册表加载（同路径只加载一次 GPU 权重）
         self.model = self._load_shared_model(model_path, config)
@@ -36,8 +38,8 @@ class FastadForeignDetector(FastADBaseDetector):
         fastad_res = raw_output
         anomaly_map = fastad_res["anomaly_map"]
         img_score = float(fastad_res["anomaly_score"])
-        pix_thresh = float(fastad_res.get("pixel_threshold", fastad_res.get("calibrated_pixel_threshold", 2.8)))
-        img_thresh = float(fastad_res.get("image_threshold", fastad_res.get("calibrated_image_threshold", 4.0)))
+        pix_thresh = float(self.pixel_threshold if self.pixel_threshold is not None else fastad_res.get("pixel_threshold", fastad_res.get("calibrated_pixel_threshold", 2.8)))
+        img_thresh = float(self.img_threshold if self.img_threshold is not None else fastad_res.get("image_threshold", fastad_res.get("calibrated_image_threshold", 4.0)))
 
         h, w = anomaly_map.shape[:2]
         cx1 = int(self.catenary_roi_ratio[0] * w)

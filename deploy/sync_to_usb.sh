@@ -26,7 +26,10 @@ rsync -avh --progress \
     --exclude='events' \
     --exclude='__pycache__' \
     --exclude='*.pyc' \
-    --exclude='.docker-compose.yml.swp' \
+    --exclude='*.swp' \
+    --exclude='.pytest_cache' \
+    --exclude='*.engine' \
+    --exclude='Qwen3-VL-4B-Instruct' \
     "${LOCAL_DIR}" "${USB_DIR}/"
 
 sync

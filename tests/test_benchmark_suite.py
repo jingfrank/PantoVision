@@ -562,7 +562,24 @@ def main():
         print(f"[INFO] 抽样完成，本次评测视频总数: {len(video_list)}\n")
 
     all_results = []
-    for vpath in video_list:
+    # 初始化逐视频实时导出的 CSV (若指定，实现增量安全落盘)
+    csv_file_handle = None
+    csv_writer = None
+    if args.export_report_csv:
+        csv_path = pathlib.Path(args.export_report_csv).resolve()
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+        csv_file_handle = open(csv_path, "w", encoding="utf-8-sig", newline="")
+        csv_fieldnames = [
+            "video", "category", "video_path", "total_frames",
+            "processed_frames", "fps", "avg_latency_ms", "p95_latency_ms",
+            "has_alarm", "alarm_faults", "alarm_count"
+        ]
+        csv_writer = csv.DictWriter(csv_file_handle, fieldnames=csv_fieldnames)
+        csv_writer.writeheader()
+        csv_file_handle.flush()
+        print(f"📄 实时评测报表已就绪 (逐视频落盘): {csv_path}")
+
+    for v_idx, vpath in enumerate(video_list, 1):
         if vpath.endswith(".bak"):
             continue
 
@@ -573,6 +590,10 @@ def main():
             category = rel_parts[0] if len(rel_parts) > 1 else "DEFAULT"
         else:
             category = p.parent.name
+
+        print(f"\n========================================================")
+        print(f"🎬 评测总体进度: [{v_idx}/{len(video_list)}] | 类别: 【{category}】")
+        print(f"========================================================")
 
         res = evaluate_video(
             video_path=vpath,
@@ -589,86 +610,28 @@ def main():
         )
         all_results.append(res)
 
-    # ── 4. 统计汇总大表输出 ───────────────────────────────────
-    valid_results = [r for r in all_results if "error" not in r]
-    total_videos = len(valid_results)
-    alarm_videos = sum(1 for r in valid_results if r.get("has_alarm", False))
-    suppressed_videos = total_videos - alarm_videos
-    fasr = (suppressed_videos / total_videos * 100.0) if total_videos > 0 else 0.0
+        # 实时写入逐视频指标 CSV
+        if csv_writer and "error" not in res:
+            alr_faults = [FAULT_NAME_MAP.get(k, k) for k, v in res["fault_counts"].items() if v > 0]
+            alr_cnt = sum(res["fault_counts"].values())
+            csv_writer.writerow({
+                "video": res["video"],
+                "category": res.get("category", "DEFAULT"),
+                "video_path": res.get("video_path", ""),
+                "total_frames": res["total_frames"],
+                "processed_frames": res["processed_frames"],
+                "fps": res["fps"],
+                "avg_latency_ms": res["avg_latency_ms"],
+                "p95_latency_ms": res["p95_latency_ms"],
+                "has_alarm": res.get("has_alarm", False),
+                "alarm_faults": ";".join(alr_faults),
+                "alarm_count": alr_cnt,
+            })
+            csv_file_handle.flush()
 
-    print("\n" + "=" * 90)
-    print(" 📊 全场景基准离线评测逐视频汇总明细")
-    print("=" * 90)
-    print(f"{'视频文件名':<22} | {'场景类别':<15} | {'帧数':<6} | {'FPS':<6} | {'均延(ms)':<8} | {'告警判定':<8} | {'检出故障'}")
-    print("-" * 90)
-    for r in valid_results:
-        vname = r["video"]
-        cat = r.get("category", "DEFAULT")
-        n_f = r["processed_frames"]
-        m_fps = r["fps"]
-        avg_l = r["avg_latency_ms"]
-        status_str = "🚨 有告警" if r.get("has_alarm") else "🛡️ 正常(无误报)"
-        active = [f"{FAULT_NAME_MAP.get(k, k)}:{v}" for k, v in r["fault_counts"].items() if v > 0]
-        active_str = ", ".join(active) if active else "-"
-        print(f"{vname:<22} | {cat:<15} | {n_f:<6} | {m_fps:<6.1f} | {avg_l:<8.1f} | {status_str:<8} | {active_str}")
-    print("=" * 90)
-
-    # 分类别统计
-    cat_summary = defaultdict(lambda: {"total": 0, "alarms": 0, "latencies": [], "fps": []})
-    for r in valid_results:
-        cat = r.get("category", "DEFAULT")
-        cat_summary[cat]["total"] += 1
-        if r.get("has_alarm"):
-            cat_summary[cat]["alarms"] += 1
-        cat_summary[cat]["latencies"].append(r["avg_latency_ms"])
-        cat_summary[cat]["fps"].append(r["fps"])
-
-    print("\n" + "=" * 80)
-    print(" 📈 分场景类别误报抑制率与性能收益 (FASR Breakdown)")
-    print("=" * 80)
-    print(f"{'场景类别':<22} | {'评测数':<6} | {'告警数':<6} | {'无误报数':<6} | {'误报抑制率(FASR)':<16} | {'平均FPS'}")
-    print("-" * 80)
-    for cat, info in sorted(cat_summary.items()):
-        c_tot = info["total"]
-        c_alr = info["alarms"]
-        c_sup = c_tot - c_alr
-        c_fasr = (c_sup / c_tot * 100.0) if c_tot > 0 else 0.0
-        c_fps = np.mean(info["fps"]) if info["fps"] else 0.0
-        print(f"{cat:<22} | {c_tot:<6} | {c_alr:<6} | {c_sup:<6} | {c_fasr:>14.1f}% | {c_fps:>6.1f}")
-    print("-" * 80)
-    print(f"【总体统计】 评测视频: {total_videos} 个 | 告警触发: {alarm_videos} 个 | 成功抑制虚警: {suppressed_videos} 个")
-    print(f"【核心指标】 总体误报抑制率 (Overall FASR): {fasr:.2f}%")
-    print("=" * 80 + "\n")
-
-    # 导出逐视频 CSV
-    if args.export_report_csv:
-        csv_path = pathlib.Path(args.export_report_csv).resolve()
-        csv_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:
-            fieldnames = [
-                "video", "category", "video_path", "total_frames",
-                "processed_frames", "fps", "avg_latency_ms", "p95_latency_ms",
-                "has_alarm", "alarm_faults", "alarm_count"
-            ]
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            for r in valid_results:
-                alr_faults = [FAULT_NAME_MAP.get(k, k) for k, v in r["fault_counts"].items() if v > 0]
-                alr_cnt = sum(r["fault_counts"].values())
-                writer.writerow({
-                    "video": r["video"],
-                    "category": r.get("category", "DEFAULT"),
-                    "video_path": r.get("video_path", ""),
-                    "total_frames": r["total_frames"],
-                    "processed_frames": r["processed_frames"],
-                    "fps": r["fps"],
-                    "avg_latency_ms": r["avg_latency_ms"],
-                    "p95_latency_ms": r["p95_latency_ms"],
-                    "has_alarm": r.get("has_alarm", False),
-                    "alarm_faults": ";".join(alr_faults),
-                    "alarm_count": alr_cnt,
-                })
-        print(f"📄 逐视频离线评测报表已导出至: {csv_path}")
+    if csv_file_handle:
+        csv_file_handle.close()
+        print(f"📄 逐视频离线评测报表已全部写入完毕并关闭: {args.export_report_csv}")
 
     # 回填 Manifest JSON (若指定)
     if args.manifest_json and os.path.isfile(args.manifest_json):

@@ -79,6 +79,7 @@ EXCLUDES=(
     "--exclude=*.pyc"
     "--exclude=*.swp"
     "--exclude=*.tmp"
+    "--exclude=*.engine"
 )
 
 if [ "$INCLUDE_MODELS" = false ]; then

@@ -26,6 +26,8 @@ class FastadStructDetector(FastADBaseDetector):
         model_path = config.get("model_path", "models/fastad_384.pt")
         self.min_defect_area = config.get("min_defect_area", 250)
         self.pantograph_roi_ratio = config.get("pantograph_roi_ratio", config.get("fallback_roi_ratio", [0.15, 0.15, 0.85, 0.70]))
+        self.img_threshold = config.get("img_threshold", None)
+        self.pixel_threshold = config.get("pixel_threshold", None)
 
         # 使用共享模型注册表加载（同路径只加载一次 GPU 权重）
         self.model = self._load_shared_model(model_path, config)
@@ -34,8 +36,8 @@ class FastadStructDetector(FastADBaseDetector):
         fastad_res = raw_output
         anomaly_map = fastad_res["anomaly_map"]
         img_score = float(fastad_res["anomaly_score"])
-        pix_thresh = float(fastad_res.get("pixel_threshold", fastad_res.get("calibrated_pixel_threshold", 2.8)))
-        img_thresh = float(fastad_res.get("image_threshold", fastad_res.get("calibrated_image_threshold", 4.0)))
+        pix_thresh = float(self.pixel_threshold if self.pixel_threshold is not None else fastad_res.get("pixel_threshold", fastad_res.get("calibrated_pixel_threshold", 2.8)))
+        img_thresh = float(self.img_threshold if self.img_threshold is not None else fastad_res.get("image_threshold", fastad_res.get("calibrated_image_threshold", 4.0)))
 
         h, w = anomaly_map.shape[:2]
 

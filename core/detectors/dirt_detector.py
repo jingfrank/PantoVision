@@ -29,6 +29,7 @@ class FastadDirtDetector(FastADBaseDetector):
         self.persistence_frames = config.get("persistence_frames", 4)
         self.min_active_cells = config.get("min_active_cells", 6)
         self.dirt_score_thresh = config.get("dirt_score_thresh", 2.0)
+        self.pixel_threshold = config.get("pixel_threshold", None)
 
         # 使用共享模型注册表加载（同路径只加载一次 GPU 权重）
         self.model = self._load_shared_model(model_path, config)
@@ -40,7 +41,7 @@ class FastadDirtDetector(FastADBaseDetector):
         fastad_res = raw_output
         anomaly_map = fastad_res["anomaly_map"]
         img_score = float(fastad_res["anomaly_score"])
-        pix_thresh = float(fastad_res.get("pixel_threshold", fastad_res.get("calibrated_pixel_threshold", 2.8)))
+        pix_thresh = float(self.pixel_threshold if self.pixel_threshold is not None else fastad_res.get("pixel_threshold", fastad_res.get("calibrated_pixel_threshold", 2.8)))
         img_thresh = float(fastad_res.get("image_threshold", fastad_res.get("calibrated_image_threshold", 4.0)))
 
         h, w = anomaly_map.shape[:2]

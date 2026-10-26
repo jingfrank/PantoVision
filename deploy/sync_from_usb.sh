@@ -21,7 +21,7 @@ if [ ! -d "${USB_SRC_DIR}" ]; then
     exit 1
 fi
 
-# 排除 FAT32/exFAT 权限污染，仅同步内容与时间戳
+# 排除 FAT32/exFAT 权限污染，仅同步内容与时间戳，跳过不可跨平台的 engine 文件
 rsync -rvltD \
     --no-perms \
     --exclude='.git' \
@@ -30,6 +30,8 @@ rsync -rvltD \
     --exclude='__pycache__' \
     --exclude='*.pyc' \
     --exclude='*.swp' \
+    --exclude='*.engine' \
+    --exclude='Qwen3-VL-4B-Instruct' \
     "${USB_SRC_DIR}/" "${LOCAL_DEST_DIR}/"
 
 echo "======================================================================"

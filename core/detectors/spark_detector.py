@@ -32,6 +32,8 @@ class YoloSparkDetector(BaseDetector):
         self.spark_area_ratio = config.get("spark_area_ratio", 0.05)
         self.spark_min_area = config.get("spark_min_area", 400)
         self.spark_duration_frames = config.get("spark_duration_frames", 12)  # ~500-700ms at 25fps
+        self.require_panto_overlap = config.get("require_panto_overlap", True)
+        self.panto_bbox_hold_sec = max(0.0, float(config.get("panto_bbox_hold_sec", 1.0)))
 
         # 优先探测并加载 TensorRT 引擎
         self.is_trt = False
@@ -61,6 +63,13 @@ class YoloSparkDetector(BaseDetector):
 
         self.current_duration_count = 0
         self.alarmed = False
+        self.last_panto_bbox = None
+        self.last_panto_timestamp = None
+
+    @staticmethod
+    def _boxes_intersect(a: List[int], b: List[int]) -> bool:
+        """Require positive-area overlap, rather than merely touching box edges."""
+        return min(a[2], b[2]) > max(a[0], b[0]) and min(a[3], b[3]) > max(a[1], b[1])
 
     def preprocess(self, image: Any, context: Optional[DetectionContext] = None) -> Any:
         return image
@@ -96,12 +105,26 @@ class YoloSparkDetector(BaseDetector):
                 context.panto_bbox = best_panto_box
                 context.panto_confidence = panto_boxes[0][1]
 
+        # Intense real arcs can temporarily hide the pantograph from YOLO. Use
+        # its last detected box briefly, but prefer the current box whenever present.
+        timestamp = context.packet.timestamp if context and context.packet else None
+        if best_panto_box is not None:
+            self.last_panto_bbox = best_panto_box
+            self.last_panto_timestamp = timestamp
+        spatial_panto_box = best_panto_box
+        if (spatial_panto_box is None and self.last_panto_bbox is not None
+                and timestamp is not None and self.last_panto_timestamp is not None
+                and 0 <= timestamp - self.last_panto_timestamp <= self.panto_bbox_hold_sec):
+            spatial_panto_box = self.last_panto_bbox
+
         # 降弓工况门控：副弓脱网无受流电流，清空火花时序计数器，静默大火花告警；
         # 但保留 YOLO 提取的受电弓目标框供后续 YoloFloatDetector 复用，避免重复推理
         is_panto_raised = context.packet.is_panto_raised if (context and context.packet) else True
         if not is_panto_raised:
             self.current_duration_count = 0
             self.alarmed = False
+            self.last_panto_bbox = None
+            self.last_panto_timestamp = None
             return DetectionResult(
                 fault_type=self.fault_type,
                 is_abnormal=False,
@@ -117,22 +140,30 @@ class YoloSparkDetector(BaseDetector):
             )
 
         # 2. 火花空间尺度与持续时间判决
-        has_spark_target = False
         target_spark_bbox = None
+        target_spark_conf = 0.0
+        qualifying_spark_boxes = []
 
         if spark_boxes:
+            area_reference_box = spatial_panto_box if self.require_panto_overlap else best_panto_box
             panto_area = (
-                (best_panto_box[2] - best_panto_box[0]) * (best_panto_box[3] - best_panto_box[1])
-                if best_panto_box else 1.0
+                (area_reference_box[2] - area_reference_box[0]) * (area_reference_box[3] - area_reference_box[1])
+                if area_reference_box else 1.0
             )
 
             for s_box, s_conf in spark_boxes:
                 s_area = (s_box[2] - s_box[0]) * (s_box[3] - s_box[1])
-                # 空间面积尺度比门限
-                if s_area >= self.spark_min_area or (s_area / panto_area) >= self.spark_area_ratio:
-                    has_spark_target = True
-                    target_spark_bbox = s_box
-                    break
+                area_ok = s_area >= self.spark_min_area or (s_area / panto_area) >= self.spark_area_ratio
+                overlap_ok = not self.require_panto_overlap or (
+                    spatial_panto_box is not None and self._boxes_intersect(s_box, spatial_panto_box)
+                )
+                if area_ok and overlap_ok:
+                    qualifying_spark_boxes.append(s_box)
+                    if s_conf > target_spark_conf:
+                        target_spark_bbox = s_box
+                        target_spark_conf = s_conf
+
+        has_spark_target = bool(qualifying_spark_boxes)
 
         if has_spark_target:
             self.current_duration_count += 1
@@ -147,23 +178,29 @@ class YoloSparkDetector(BaseDetector):
             is_abnormal = self.current_duration_count >= self.spark_duration_frames
             level = "critical" if is_abnormal else ("warning" if self.current_duration_count >= 5 else "normal")
 
-        if context is not None and spark_boxes:
-            context.spark_bboxes = [b[0] for b in spark_boxes]
+        if context is not None:
+            context.spark_bboxes = qualifying_spark_boxes
 
         return DetectionResult(
             fault_type=self.fault_type,
             is_abnormal=is_abnormal,
-            score=round(max_spark_conf, 3),
+            score=round(target_spark_conf, 3),
             level=level,
-            bbox=target_spark_bbox or (spark_boxes[0][0] if spark_boxes else None),
+            bbox=target_spark_bbox,
             extra={
                 "duration_frames": self.current_duration_count,
                 "duration_thresh": self.spark_duration_frames,
                 "panto_bbox": best_panto_box,
-                "spark_count": len(spark_boxes),
+                "spatial_reference_bbox": spatial_panto_box,
+                "spark_count": len(qualifying_spark_boxes),
+                "raw_spark_count": len(spark_boxes),
+                "raw_spark_bboxes": [box for box, _ in spark_boxes],
+                "raw_max_spark_conf": round(max_spark_conf, 3),
             }
         )
 
     def reset(self) -> None:
         self.current_duration_count = 0
         self.alarmed = False
+        self.last_panto_bbox = None
+        self.last_panto_timestamp = None

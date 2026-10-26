@@ -24,7 +24,7 @@ import argparse
 import subprocess
 import shutil
 import logging
-from typing import Optional, Dict, Any, Tuple, List
+from typing import Optional, Dict, Any, Tuple, List, Union
 import numpy as np
 import torch
 
@@ -392,10 +392,16 @@ class PrunedWideResNetBackbone(torch.nn.Module):
     剪枝 WideResNet-50 骨干网络 (仅保留到目标特征提取层，丢弃后续冗余 94% 参数).
     """
 
-    def __init__(self, weights_path: str, max_layer: int = 2):
+    def __init__(self, weights_path: str, layers_to_extract: Union[int, List[int]] = 2):
         super().__init__()
         import timm
         from safetensors.torch import load_file
+
+        if isinstance(layers_to_extract, int):
+            self.layers_to_extract = [layers_to_extract]
+        else:
+            self.layers_to_extract = list(layers_to_extract)
+        self.max_layer = max(self.layers_to_extract)
 
         base = timm.create_model("wide_resnet50_2", pretrained=False)
         if weights_path.endswith(".safetensors"):
@@ -410,10 +416,9 @@ class PrunedWideResNetBackbone(torch.nn.Module):
         self.maxpool = base.maxpool
         self.layer1 = base.layer1
         self.layer2 = base.layer2
-        self.max_layer = max_layer
-        if max_layer >= 3:
+        if self.max_layer >= 3:
             self.layer3 = base.layer3
-        if max_layer >= 4:
+        if self.max_layer >= 4:
             self.layer4 = base.layer4
         self.eval()
 
@@ -424,16 +429,18 @@ class PrunedWideResNetBackbone(torch.nn.Module):
         x = self.maxpool(x)
         x = self.layer1(x)
         x2 = self.layer2(x)
-        if self.max_layer == 2:
-            return x2
-        elif self.max_layer == 3:
+        feature_map = {2: x2}
+        if self.max_layer >= 3:
             x3 = self.layer3(x2)
-            return x2, x3
-        elif self.max_layer == 4:
-            x3 = self.layer3(x2)
+            feature_map[3] = x3
+        if self.max_layer >= 4:
             x4 = self.layer4(x3)
-            return x2, x3, x4
-        return x2
+            feature_map[4] = x4
+
+        outputs = [feature_map[l] for l in sorted(self.layers_to_extract)]
+        if len(outputs) == 1:
+            return outputs[0]
+        return tuple(outputs)
 
 
 def validate_fastad_parity(
@@ -452,7 +459,7 @@ def validate_fastad_parity(
         dev = torch.device(device_str)
 
         max_layer = max(layer_to_extract)
-        pt_model = PrunedWideResNetBackbone(weights_path, max_layer=max_layer).to(dev)
+        pt_model = PrunedWideResNetBackbone(weights_path, layers_to_extract=layer_to_extract).to(dev)
         pt_model.eval()
 
         trt_runner = TrtFastADBackboneRunner(engine_path, device=device_str)
@@ -548,7 +555,7 @@ def export_fastad(
     device_str = f"cuda:{device}" if torch.cuda.is_available() else "cpu"
     dev = torch.device(device_str)
 
-    model = PrunedWideResNetBackbone(weights_path, max_layer=max_layer).to(dev)
+    model = PrunedWideResNetBackbone(weights_path, layers_to_extract=layer_to_extract).to(dev)
     model.eval()
 
     dummy_input = torch.randn(1, 3, input_size[1], input_size[0], device=dev, dtype=torch.float32)
@@ -628,6 +635,18 @@ def main():
         action="store_true",
         help="跳过数值精度自检",
     )
+    parser.add_argument(
+        "--fastad-pt",
+        type=str,
+        default="models/fastad_layer2_256_reg1e4_nq3_fmq1.pt",
+        help="待导出的 FastAD pt 权重路径",
+    )
+    parser.add_argument(
+        "--fastad-engine",
+        type=str,
+        default=None,
+        help="目标 FastAD TensorRT Engine 路径 (默认根据 pt 自动推断)",
+    )
     args = parser.parse_args()
 
     validate = not args.no_validate
@@ -655,8 +674,8 @@ def main():
 
     if args.model in ("all", "fastad"):
         ok = export_fastad(
-            pt_path="models/fastad_layer2_256_reg1e4_nq3_fmq1.pt",
-            engine_path="models/fastad_layer2_256.engine",
+            pt_path=args.fastad_pt,
+            engine_path=args.fastad_engine,
             precision=args.precision,
             device=args.device,
             validate=validate,

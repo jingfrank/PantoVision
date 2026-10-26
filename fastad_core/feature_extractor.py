@@ -35,7 +35,11 @@ class FeatureExtractor(nn.Module):
             if self.engine_path:
                 trt_candidates.append(self.engine_path)
             repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            req_layers = [self.layer_to_extract] if isinstance(self.layer_to_extract, int) else list(self.layer_to_extract)
+            max_l = max(req_layers) if req_layers else 2
             trt_candidates.extend([
+                os.path.join(repo_root, "models", f"fastad_layer{max_l}_256.engine"),
+                os.path.join(repo_root, "models", "fastad_layer3_256.engine"),
                 os.path.join(repo_root, "models", "fastad_layer2_256.engine"),
                 os.path.join(repo_root, "models", "fastad_384.engine"),
             ])
@@ -43,9 +47,14 @@ class FeatureExtractor(nn.Module):
                 if cand and os.path.exists(cand):
                     try:
                         from fastad_core.trt_backbone import TrtFastADBackboneRunner
-                        self.trt_runner = TrtFastADBackboneRunner(cand, device=str(self.device))
-                        print(f"[FeatureExtractor] 成功加载 FastAD TensorRT 骨干引擎: {cand}")
-                        break
+                        runner = TrtFastADBackboneRunner(cand, device=str(self.device))
+                        expected_names = [f"layer{l}_features" for l in req_layers]
+                        if all(en in runner.output_names for en in expected_names):
+                            self.trt_runner = runner
+                            print(f"[FeatureExtractor] 成功加载 FastAD TensorRT 骨干引擎: {cand}")
+                            break
+                        else:
+                            logger.info(f"[FeatureExtractor] 跳过特征层不匹配的 Engine: {cand} (期望: {expected_names}, 实际: {runner.output_names})")
                     except Exception as e:
                         logger.warning(f"[FeatureExtractor] TensorRT 骨干加载失败 ({cand}): {e}")
                         self.trt_runner = None
