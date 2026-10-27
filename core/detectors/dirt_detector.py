@@ -51,6 +51,19 @@ class FastadDirtDetector(FastADBaseDetector):
                 extra={"status": "camera_offset_suppressed", "top_lap_var": getattr(context, "top_lap_var", 0.0)}
             )
 
+        # 受电弓显示不全拦截 (监控不完整/残缺半弓/边缘截断)：静默脏污检测并清空累积历史，防止车身结构误报脏污
+        if context is not None and getattr(context, "is_panto_incomplete", False):
+            self.dirt_grid_history = None
+            self.history_length = 0
+            return DetectionResult(
+                fault_type=self.fault_type,
+                is_abnormal=False,
+                score=0.0,
+                level="normal",
+                bbox=None,
+                extra={"status": "panto_incomplete_suppressed", "persistent_cells": 0}
+            )
+
         fastad_res = raw_output
         anomaly_map = fastad_res["anomaly_map"]
         img_score = float(fastad_res["anomaly_score"])

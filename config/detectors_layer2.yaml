@@ -21,6 +21,8 @@ detectors:
     spark_duration_frames: 12
     require_panto_overlap: true
     panto_bbox_hold_sec: 1.0
+    panto_min_conf: 0.05
+    panto_incomplete_hold_sec: 10.0
 - name: dirt
   type: FastadDirtDetector
   enabled: true
@@ -97,7 +99,7 @@ detectors:
     - 0.7
 - name: foreign_object
   type: FastadForeignDetector
-  enabled: false
+  enabled: true
   schedule:
     mode: interval
     sample_interval_sec: 1.0
@@ -113,6 +115,7 @@ detectors:
     - 0.25
     - 0.85
     - 0.5
-    min_foreign_area: 100
+    min_foreign_area: 250
     max_blobs_filter: 12
-    foreign_score_threshold: 2.2
+    img_threshold: 8.5
+    pixel_threshold: 2.8

@@ -44,6 +44,17 @@ class FastadStructDetector(FastADBaseDetector):
                 extra={"status": "camera_offset_suppressed", "defect_count": 0, "bboxes": []}
             )
 
+        # 受电弓显示不全拦截 (监控不完整/残缺半弓/边缘截断)：严禁执行结构异常检测
+        if context is not None and getattr(context, "is_panto_incomplete", False):
+            return DetectionResult(
+                fault_type=self.fault_type,
+                is_abnormal=False,
+                score=0.0,
+                level="normal",
+                bbox=None,
+                extra={"status": "panto_incomplete_suppressed", "defect_count": 0, "bboxes": []}
+            )
+
         fastad_res = raw_output
         anomaly_map = fastad_res["anomaly_map"]
         img_score = float(fastad_res["anomaly_score"])

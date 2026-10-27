@@ -29,6 +29,8 @@ class YoloSparkDetector(BaseDetector):
         engine_path = config.get("engine_path", None)
         prefer_trt = config.get("prefer_tensorrt", True)
         self.conf_thresh = config.get("conf_thresh", 0.30)
+        self.panto_min_conf = float(config.get("panto_min_conf", 0.05))
+        self.panto_incomplete_hold_sec = float(config.get("panto_incomplete_hold_sec", 10.0))
         self.spark_area_ratio = config.get("spark_area_ratio", 0.05)
         self.spark_min_area = config.get("spark_min_area", 400)
         self.spark_duration_frames = config.get("spark_duration_frames", 12)  # ~500-700ms at 25fps
@@ -65,6 +67,7 @@ class YoloSparkDetector(BaseDetector):
         self.alarmed = False
         self.last_panto_bbox = None
         self.last_panto_timestamp = None
+        self.last_incomplete_timestamp = None
 
     @staticmethod
     def _boxes_intersect(a: List[int], b: List[int]) -> bool:
@@ -75,8 +78,9 @@ class YoloSparkDetector(BaseDetector):
         return image
 
     def infer(self, tensor: Any) -> Any:
-        # Ultralytics 直接支持 numpy 图像输入
-        return self.model(tensor, conf=self.conf_thresh, verbose=False)
+        # Ultralytics 直接支持 numpy 图像输入，推理置信度使用 min(conf_thresh, panto_min_conf) 保证边缘残损弓可检出
+        infer_conf = min(self.conf_thresh, self.panto_min_conf)
+        return self.model(tensor, conf=infer_conf, verbose=False)
 
     def postprocess(self, raw_output: Any, context: Optional[DetectionContext] = None) -> DetectionResult:
         res = raw_output[0] if isinstance(raw_output, list) else raw_output
@@ -92,9 +96,10 @@ class YoloSparkDetector(BaseDetector):
             if cls_id == 1:  # pantograph
                 panto_boxes.append((xyxy, conf))
             elif cls_id == 2:  # spark
-                spark_boxes.append((xyxy, conf))
-                if conf > max_spark_conf:
-                    max_spark_conf = conf
+                if conf >= self.conf_thresh:
+                    spark_boxes.append((xyxy, conf))
+                    if conf > max_spark_conf:
+                        max_spark_conf = conf
 
         # 1. 提取并进行受电弓目标几何合法性校验 (Geometric Sanity Check)
         best_panto_box = None
@@ -102,9 +107,12 @@ class YoloSparkDetector(BaseDetector):
         frame_ref = context.packet.frame if (context and context.packet is not None) else None
         img_h, img_w = frame_ref.shape[:2] if frame_ref is not None else (1536, 2048)
 
-        if panto_boxes:
-            panto_boxes.sort(key=lambda item: (item[0][2] - item[0][0]) * (item[0][3] - item[0][1]), reverse=True)
-            for pbox, pconf in panto_boxes:
+        high_panto_boxes = [item for item in panto_boxes if item[1] >= self.conf_thresh]
+        low_panto_boxes = [item for item in panto_boxes if item[1] < self.conf_thresh]
+
+        if high_panto_boxes:
+            high_panto_boxes.sort(key=lambda item: (item[0][2] - item[0][0]) * (item[0][3] - item[0][1]), reverse=True)
+            for pbox, pconf in high_panto_boxes:
                 bw = pbox[2] - pbox[0]
                 bh = pbox[3] - pbox[1]
                 aspect_ratio = bw / max(bh, 1)
@@ -135,6 +143,53 @@ class YoloSparkDetector(BaseDetector):
                 best_panto_conf = pconf
                 break
 
+        # 受电弓显示完整度检查 (监控不完整/边缘截断识别与时序锁存)
+        timestamp = context.packet.timestamp if context and context.packet else None
+        is_panto_incomplete = False
+        margin_x = max(30, int(img_w * 0.02))
+        margin_y = max(25, int(img_h * 0.025))
+
+        if best_panto_box is not None:
+            px1, py1, px2, py2 = best_panto_box
+            touches_edge = (
+                px1 <= margin_x or
+                px2 >= img_w - margin_x or
+                py1 <= margin_y or
+                py2 >= img_h - margin_y
+            )
+            pw = px2 - px1
+            too_narrow = (pw < img_w * 0.45) and (px1 <= margin_x * 2 or px2 >= img_w - margin_x * 2)
+            if touches_edge or too_narrow:
+                is_panto_incomplete = True
+                self.last_incomplete_timestamp = timestamp
+                logger.info(
+                    "[spark_detector] 标记受电弓显示不全 (is_panto_incomplete=True): box=%s, w=%d, h=%d",
+                    best_panto_box, img_w, img_h
+                )
+            else:
+                # 画面中心清晰检出完整正常受电弓，重置显示不全时序锁存
+                is_panto_incomplete = False
+                self.last_incomplete_timestamp = None
+        else:
+            # 1. 检查是否存在贴边的低置信度受电弓候选（因严重出画导致置信度下降）
+            edge_low_candidate = False
+            for lpbox, lpconf in low_panto_boxes:
+                lpx1, lpy1, lpx2, lpy2 = lpbox
+                if (lpx1 <= margin_x or lpx2 >= img_w - margin_x or
+                        lpy1 <= margin_y or lpy2 >= img_h - margin_y):
+                    edge_low_candidate = True
+                    break
+            if edge_low_candidate:
+                is_panto_incomplete = True
+                self.last_incomplete_timestamp = timestamp
+                logger.info(
+                    "[spark_detector] 召回贴边低置信度受电弓候选, 维持显示不全状态 (is_panto_incomplete=True)"
+                )
+            elif (self.last_incomplete_timestamp is not None and timestamp is not None
+                  and 0 <= timestamp - self.last_incomplete_timestamp <= self.panto_incomplete_hold_sec):
+                # 2. 时序平滑锁存：若近期受电弓贴边残缺且当前无弓，说明受电弓已完全滑出画幅外，维持不全抑制
+                is_panto_incomplete = True
+
         # 视场状态与清晰度辅助判定 (LapVar Analysis)
         top_lap_var = 0.0
         full_lap_var = 0.0
@@ -162,6 +217,7 @@ class YoloSparkDetector(BaseDetector):
             context.panto_bbox = best_panto_box
             context.panto_confidence = best_panto_conf
             context.is_camera_offset = is_camera_offset
+            context.is_panto_incomplete = is_panto_incomplete
             context.top_lap_var = top_lap_var
 
         # Intense real arcs can temporarily hide the pantograph from YOLO. Use
@@ -263,3 +319,4 @@ class YoloSparkDetector(BaseDetector):
         self.alarmed = False
         self.last_panto_bbox = None
         self.last_panto_timestamp = None
+        self.last_incomplete_timestamp = None
