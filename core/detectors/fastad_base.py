@@ -12,6 +12,7 @@ FastAD Shared Base Detector (FastAD 系列检测器共用基类).
 import os
 import logging
 import threading
+import numpy as np
 from typing import Any, Optional, Dict
 from abc import abstractmethod
 
@@ -83,10 +84,22 @@ class FastADBaseDetector(BaseDetector):
 
     def infer(self, tensor: Any) -> Any:
         """
-        智能推理：优先从黑板缓存读取同帧已有的 FastAD 结果，
-        若缓存未命中则执行推理并写入缓存供后续检测器复用。
+        智能推理：
+        1. 若黑板检测到画面严重偏移（is_camera_offset=True），直接阻断 FastAD 骨干网络前向推理，
+           返回全零静态虚拟字典，避免昂贵且无意义的 GPU 耗时与 OOD 异常图泛滥；
+        2. 优先从黑板缓存读取同帧已有的 FastAD 结果，缓存命中跳过 GPU 计算；
+        3. 缓存未命中执行完整推理并写入黑板。
         """
         ctx = getattr(self, "_current_context", None)
+        if ctx is not None and getattr(ctx, "is_camera_offset", False):
+            # 视场偏转，快速阻断 GPU 前向推理
+            orig_h, orig_w = tensor.shape[:2] if hasattr(tensor, "shape") else (1536, 2048)
+            return {
+                "anomaly_score": 0.0,
+                "anomaly_map": np.zeros((orig_h, orig_w), dtype=np.float32),
+                "is_camera_offset_bypassed": True,
+            }
+
         cache_key = f"fastad_result:{self._model_path_abs}"
 
         # 黑板缓存命中：直接复用，跳过 GPU 推理 (耗时 < 0.01ms)

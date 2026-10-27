@@ -35,6 +35,17 @@ class FastadForeignDetector(FastADBaseDetector):
         self.model = self._load_shared_model(model_path, config)
 
     def postprocess(self, raw_output: Any, context: Optional[DetectionContext] = None) -> DetectionResult:
+        # 视场偏转防御拦截：画面锐利但无合法受电弓，彻底静默悬挂异物检测
+        if context is not None and getattr(context, "is_camera_offset", False):
+            return DetectionResult(
+                fault_type=self.fault_type,
+                is_abnormal=False,
+                score=0.0,
+                level="normal",
+                bbox=None,
+                extra={"status": "camera_offset_suppressed", "foreign_count": 0, "bboxes": []}
+            )
+
         fastad_res = raw_output
         anomaly_map = fastad_res["anomaly_map"]
         img_score = float(fastad_res["anomaly_score"])

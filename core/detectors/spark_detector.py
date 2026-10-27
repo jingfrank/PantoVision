@@ -96,14 +96,73 @@ class YoloSparkDetector(BaseDetector):
                 if conf > max_spark_conf:
                     max_spark_conf = conf
 
-        # 1. 提取并共享受电弓目标框至上下文黑板 (Blackboard Export)
+        # 1. 提取并进行受电弓目标几何合法性校验 (Geometric Sanity Check)
         best_panto_box = None
+        best_panto_conf = 0.0
+        frame_ref = context.packet.frame if (context and context.packet is not None) else None
+        img_h, img_w = frame_ref.shape[:2] if frame_ref is not None else (1536, 2048)
+
         if panto_boxes:
             panto_boxes.sort(key=lambda item: (item[0][2] - item[0][0]) * (item[0][3] - item[0][1]), reverse=True)
-            best_panto_box = panto_boxes[0][0]
-            if context is not None:
-                context.panto_bbox = best_panto_box
-                context.panto_confidence = panto_boxes[0][1]
+            for pbox, pconf in panto_boxes:
+                bw = pbox[2] - pbox[0]
+                bh = pbox[3] - pbox[1]
+                aspect_ratio = bw / max(bh, 1)
+
+                # ① 宽高比检查：受电弓横梁呈扁平水平分布，宽高比通常 >= 1.5
+                if aspect_ratio < 1.5:
+                    logger.debug("[spark_detector] 剔除宽高比异常虚警框: W/H=%.2f < 1.5, box=%s", aspect_ratio, pbox)
+                    continue
+
+                # ② 极端边缘截断检查：同时贴合两条及以上物理边缘的目标多为车体侧壁/导流板
+                edge_margin = 15
+                edge_count = sum([
+                    pbox[0] <= edge_margin,         # 紧贴左边界
+                    pbox[2] >= img_w - edge_margin, # 紧贴右边界
+                    pbox[3] >= img_h - edge_margin, # 紧贴底部边界
+                ])
+                if edge_count >= 2:
+                    logger.debug("[spark_detector] 剔除贴边截断虚警框: edge_count=%d, box=%s", edge_count, pbox)
+                    continue
+
+                # ③ 面积下限检查：受电弓本体至少占画面一定面积
+                area_fraction = (bw * bh) / float(img_w * img_h)
+                if area_fraction < 0.005:
+                    logger.debug("[spark_detector] 剔除过小虚警框: area_frac=%.4f < 0.005, box=%s", area_fraction, pbox)
+                    continue
+
+                best_panto_box = pbox
+                best_panto_conf = pconf
+                break
+
+        # 视场状态与清晰度辅助判定 (LapVar Analysis)
+        top_lap_var = 0.0
+        full_lap_var = 0.0
+        is_camera_offset = False
+        if frame_ref is not None:
+            import cv2
+            h_valid = int(img_h * 0.82)
+            gray = cv2.cvtColor(frame_ref[:h_valid, :], cv2.COLOR_BGR2GRAY)
+            top_h = max(10, int(h_valid * 0.30))
+            top_gray = gray[:top_h, :]
+            top_lap_var = float(cv2.Laplacian(top_gray, cv2.CV_64F).var())
+            full_lap_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+            # 若未检出合法受电弓，且画面包含大量锋利锐利硬边缘（顶部 TopLap > 160 或全图 FullLap > 300），
+            # 真实脏污无弓样本的 TopLap 均值仅 22.6、95% 分位数在 119 以下；
+            # 只有拍摄到车顶金属/绝缘子/钣金构件等非受电弓视场时才会产生极高清晰度。
+            if best_panto_box is None and (top_lap_var > 160.0 or full_lap_var > 300.0):
+                is_camera_offset = True
+                logger.info(
+                    "[spark_detector] 触发视场偏转标记 (is_camera_offset=True): 无合法受电弓且 (TopLap=%.1f > 160 或 FullLap=%.1f > 300)",
+                    top_lap_var, full_lap_var
+                )
+
+        if context is not None:
+            context.panto_bbox = best_panto_box
+            context.panto_confidence = best_panto_conf
+            context.is_camera_offset = is_camera_offset
+            context.top_lap_var = top_lap_var
 
         # Intense real arcs can temporarily hide the pantograph from YOLO. Use
         # its last detected box briefly, but prefer the current box whenever present.

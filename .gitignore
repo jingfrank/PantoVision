@@ -38,6 +38,7 @@ models/*
 截图*.jpg
 *.tmp
 *.bak
+.~*
 .DS_Store
 Thumbs.db
 

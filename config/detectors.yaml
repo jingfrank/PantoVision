@@ -30,8 +30,8 @@ detectors:
     phase_offset_sec: 0.0
     panto_gate: raised_only
   params:
-    model_path: models/fastad_layer3_dataset.pt
-    engine_path: models/fastad_layer3_256.engine
+    model_path: models/fastad_layer2_256_reg1e4_nq3_fmq1.pt
+    engine_path: models/fastad_layer2_256.engine
     prefer_tensorrt: true
     use_gpu_preprocess: true
     grid_size: 64
@@ -84,17 +84,17 @@ detectors:
     phase_offset_sec: 0.0
     panto_gate: raised_only
   params:
-    model_path: models/fastad_layer3_dataset.pt
-    engine_path: models/fastad_layer3_256.engine
+    model_path: models/fastad_layer2_256_reg1e4_nq3_fmq1.pt
+    engine_path: models/fastad_layer2_256.engine
     prefer_tensorrt: true
     use_gpu_preprocess: true
-    min_defect_area: 500
+    min_defect_area: 250
     pantograph_roi_ratio:
     - 0.15
     - 0.15
     - 0.85
     - 0.7
-    img_threshold: 5.0
+    img_threshold: 8.5
     pixel_threshold: 4.0
 - name: foreign_object
   type: FastadForeignDetector

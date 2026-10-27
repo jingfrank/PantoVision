@@ -51,6 +51,8 @@ class DetectionContext:
     packet: FramePacket
     panto_bbox: Optional[List[int]] = None       # [px1, py1, px2, py2]
     panto_confidence: float = 0.0
+    is_camera_offset: bool = False               # 视场偏转标记: 画面清晰锐利但无合法受电弓
+    top_lap_var: float = 0.0                     # 顶部高空视场拉普拉斯方差
     spark_bboxes: List[List[int]] = field(default_factory=list)
     shared_data: Dict[str, Any] = field(default_factory=dict)
 

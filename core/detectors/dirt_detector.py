@@ -38,6 +38,19 @@ class FastadDirtDetector(FastADBaseDetector):
         self.history_length = 0
 
     def postprocess(self, raw_output: Any, context: Optional[DetectionContext] = None) -> DetectionResult:
+        # 视场偏转防御拦截：画面锐利但无合法受电弓，彻底静默脏污检测
+        if context is not None and getattr(context, "is_camera_offset", False):
+            self.dirt_grid_history = None
+            self.history_length = 0
+            return DetectionResult(
+                fault_type=self.fault_type,
+                is_abnormal=False,
+                score=0.0,
+                level="normal",
+                bbox=None,
+                extra={"status": "camera_offset_suppressed", "top_lap_var": getattr(context, "top_lap_var", 0.0)}
+            )
+
         fastad_res = raw_output
         anomaly_map = fastad_res["anomaly_map"]
         img_score = float(fastad_res["anomaly_score"])
