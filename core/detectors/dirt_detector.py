@@ -85,29 +85,16 @@ class FastadDirtDetector(FastADBaseDetector):
         grid_anom = cv2.resize(dirt_clean, (gw, gh), interpolation=cv2.INTER_AREA)
         grid_active = (grid_anom >= pix_thresh).astype(np.float32)
 
-        # 自适应开阔视场校验 (Adaptive Sky/Aperture Check)
+        # 自适应开阔视场统计 (Adaptive Sky/Aperture Statistics)
         sky_cells = 0
         panto_bbox = context.panto_bbox if (context and context.panto_bbox) else None
         if panto_bbox:
-            # 正常检出受电弓时：以弓头顶端以上的纯天空视场作为基准
+            # 正常检出受电弓时：以弓头顶端以上的纯天空视场作为统计基准
             top_grid = max(1, int(panto_bbox[1] / h_dirt_limit * gh))
             sky_cells = int(np.sum(grid_active[:top_grid, :]))
-
-            # 若受电弓存在但上方天空极其洁净 (sky_cells < 4)，说明异常严格限制在构件内部，绝非镜头光学污染
-            if sky_cells < 4:
-                self.dirt_grid_history = None
-                self.history_length = 0
-                return DetectionResult(
-                    fault_type=self.fault_type,
-                    is_abnormal=False,
-                    score=0.0,
-                    level="normal",
-                    bbox=None,
-                    extra={"sky_cells": sky_cells, "is_pending": False, "history_length": 0}
-                )
         else:
             # 严重脏污场景 (如 dirty_2.mp4 泥浆糊死镜头致 YOLO 漏检受电弓)：
-            # 回退采用车顶固定物理机位先验：顶部 25% 网格行 (0~16行) 恒定为高空开阔视域
+            # 回退采用车顶固定物理机位先验：顶部 25% 网格行 (0~16行) 作为高空开阔视域统计
             sky_cells = int(np.sum(grid_active[:int(gh * 0.25), :]))
 
         # 时序 EMA 衰减累积 (网格坐标系绝对静止滤波)

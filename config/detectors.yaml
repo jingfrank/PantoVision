@@ -41,7 +41,7 @@ detectors:
     persistence_frames: 4
     min_active_cells: 6
     dirt_score_thresh: 2.0
-    pixel_threshold: 4.5
+    pixel_threshold: 2.8
 - name: tilt
   type: HrnetTiltDetector
   enabled: true
