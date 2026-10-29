@@ -9,6 +9,11 @@
 import os
 import sys
 import time
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True)
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(line_buffering=True)
 import argparse
 import glob
 import json
@@ -639,6 +644,7 @@ def main():
             with open(args.manifest_json, "r", encoding="utf-8") as f:
                 manifest_records = json.load(f)
 
+            valid_results = [r for r in all_results if "error" not in r]
             res_map = {r["video_path"]: r for r in valid_results}
             res_map_name = {r["video"]: r for r in valid_results}
 

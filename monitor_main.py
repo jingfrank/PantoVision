@@ -193,6 +193,16 @@ def main():
     finally:
         logger.info("[监测服务] 正在关闭 AI 识别引擎...")
         stop_event.set()
+        for t in ai_threads:
+            t.join(timeout=2.0)
+        report_dir = os.path.join(app_dir, "local_cache", "reports")
+        for det in detectors:
+            try:
+                if hasattr(det, "perf_monitor") and det.perf_monitor:
+                    md_path = os.path.join(report_dir, f"system_perf_report_CAR{det.car_number}_CAM{det.camera_id}.md")
+                    det.perf_monitor.export_report(md_path)
+            except Exception as e:
+                logger.debug(f"性能报告导出跳过: {e}")
         if phm_reporter:
             phm_reporter.stop()
         udp_sock.close()

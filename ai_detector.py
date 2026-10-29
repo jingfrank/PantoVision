@@ -131,11 +131,16 @@ class PantographFaultDetector:
 
         # 6. 实时性能监控器
         perf_cfg = global_cfg.get("log_config", {}).get("perf_monitor", {})
+        report_dir = perf_cfg.get("report_dir", "")
+        if not report_dir:
+            report_dir = os.path.join(BASE_DIR, "local_cache", "reports")
         self.perf_monitor = PerformanceMonitor(
             source_fps=float(self.vs_cfg.get("fps", 25.0)),
             report_interval_sec=float(perf_cfg.get("report_interval_sec", 10.0)),
             enabled=bool(perf_cfg.get("enabled", True)),
             logger_name=f"perf_monitor.CAR{self.car_number}.CAM{self.camera_id}",
+            auto_export_report=bool(perf_cfg.get("auto_export_report", True)),
+            report_dir=report_dir,
         )
 
     # 供 usrcode.py 和 PHM 周期心跳读取与设置的属性映射
@@ -523,4 +528,8 @@ class PantographFaultDetector:
             self.ring_buffer.stop()
             self.async_uploader.stop()
             self.udp_sender.close()
+            try:
+                self.perf_monitor.log_summary()
+            except Exception:
+                pass
             logger.info(f"[AI-CAR{self.car_number}-CAM{self.camera_id}] 检测服务已安全停止")

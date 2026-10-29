@@ -90,3 +90,5 @@ log_config:
   perf_monitor:
     enabled: true             # false 则完全关闭，零开销
     report_interval_sec: 10.0 # 汇报周期（秒），Jetson 测试建议 5~10s
+    auto_export_report: true  # 自动生成/刷新 Markdown 和 JSON 性能评测大盘
+    report_dir: "local_cache/reports" # 性能报告输出目录
