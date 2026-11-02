@@ -118,17 +118,19 @@ class FusionEngine:
 
         # ------------------------------------------------------------------
         # 规则 1：大火花强电弧抑制 (Spark Dominance)
-        # 火花发生瞬间白炽漫反射强烈，强制抑制结构异常、悬挂异物与画面脏污误报。
+        # 火花发生瞬间白炽漫反射与耀斑强烈，强制抑制结构异常、悬挂异物、画面脏污及受电弓倾斜误报。
         # Hold 结果同样参与此规则，行为与新鲜结果一致。
         # ------------------------------------------------------------------
         suppress_struct = False
         suppress_foreign = False
         suppress_dirty = False
+        suppress_tilt = False
 
         if spark_active:
             suppress_struct = True
             suppress_foreign = True
             suppress_dirty = True
+            suppress_tilt = True
 
         # ------------------------------------------------------------------
         # 提取受电弓本体 BBox (由 YOLO 检出)
@@ -199,6 +201,25 @@ class FusionEngine:
             f_copy.extra["suppressed_by"] = "structure_overlap" if struct_active else "dirt_isolation"
             merged["foreign_object"] = f_copy
 
+        # 若倾斜受电弧强光抑制，同步重置合并集合与跨帧缓存状态，防止强光耀斑后残存虚假倾斜
+        if suppress_tilt:
+            if "tilt" in merged:
+                t_copy = copy.copy(merged["tilt"])
+                t_copy.is_abnormal = False
+                t_copy.level = "normal"
+                t_copy.extra = dict(t_copy.extra)
+                t_copy.extra["suppressed_by"] = "spark_dominance"
+                merged["tilt"] = t_copy
+            if "tilt" in self.cached_results:
+                c_res, c_ts = self.cached_results["tilt"]
+                if c_res.is_abnormal:
+                    c_clean = copy.copy(c_res)
+                    c_clean.is_abnormal = False
+                    c_clean.level = "normal"
+                    c_clean.extra = dict(c_clean.extra)
+                    c_clean.extra["suppressed_by"] = "spark_dominance"
+                    self.cached_results["tilt"] = (c_clean, c_ts)
+
         # 收集有效告警清单
         active_alarms: List[Dict[str, Any]] = []
 
@@ -211,6 +232,8 @@ class FusionEngine:
             if f_type == "foreign_object" and suppress_foreign:
                 continue
             if f_type == "dirty" and suppress_dirty:
+                continue
+            if f_type == "tilt" and suppress_tilt:
                 continue
             if res.level == "unknown":
                 # 失败隔离状态：不触发误报警，仅记录

@@ -124,7 +124,7 @@ class PerformanceMonitor:
         self._logger = logging.getLogger(logger_name)
         self.auto_export_report = auto_export_report
         self.report_dir = report_dir
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
         # 窗口统计
         self._window_start: float = time.monotonic()

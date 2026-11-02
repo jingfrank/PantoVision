@@ -117,6 +117,7 @@ class TegraStatsCollector:
         self.interval_ms = interval_ms
         self.stop_event = threading.Event()
         self.thread: Optional[threading.Thread] = None
+        self.proc: Optional[subprocess.Popen] = None
         self.nvdec_samples: List[float] = []
         self.vic_samples: List[float] = []
         self.gpu_samples: List[float] = []
@@ -138,14 +139,17 @@ class TegraStatsCollector:
 
     def _worker(self) -> None:
         try:
-            proc = subprocess.Popen(
+            self.proc = subprocess.Popen(
                 ["/usr/bin/tegrastats", "--interval", str(self.interval_ms)],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
-                text=True
+                text=True,
+                bufsize=1
             )
             while not self.stop_event.is_set():
-                line = proc.stdout.readline()
+                if self.proc.stdout is None:
+                    break
+                line = self.proc.stdout.readline()
                 if not line:
                     break
 
@@ -173,20 +177,30 @@ class TegraStatsCollector:
                 m_temp = re.search(r"tj@([\d.]+)C", line)
                 if m_temp:
                     self.temp_c_samples.append(float(m_temp.group(1)))
-
-            proc.terminate()
-            try:
-                proc.wait(timeout=1.0)
-            except Exception:
-                proc.kill()
         except Exception:
             pass
+        finally:
+            self._cleanup_proc()
+
+    def _cleanup_proc(self) -> None:
+        if self.proc is not None:
+            try:
+                self.proc.terminate()
+                self.proc.wait(timeout=0.5)
+            except Exception:
+                try:
+                    self.proc.kill()
+                except Exception:
+                    pass
+            self.proc = None
 
     def stop(self) -> Dict[str, Any]:
         if not self.has_tegrastats or self.thread is None:
             return {"is_jetson": False}
         self.stop_event.set()
-        self.thread.join(timeout=1.0)
+        self._cleanup_proc()
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=1.0)
         return {
             "is_jetson": True,
             "nvdec_avg_pct": round(float(np.mean(self.nvdec_samples)), 1) if self.nvdec_samples else 0.0,
@@ -248,6 +262,11 @@ class VideoFrameProvider:
                 # 循环回绕
                 self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                 ret, frame = self.cap.read()
+                if not ret or frame is None:
+                    # 部分 MP4 在 EOF 时 seek 失败，重新打开流
+                    self.cap.release()
+                    self.cap = cv2.VideoCapture(self.video_path)
+                    ret, frame = self.cap.read()
             if ret and frame is not None:
                 cost_ms = (time.perf_counter() - t0) * 1000.0
                 return frame, cost_ms
@@ -416,6 +435,9 @@ def run_e2e_benchmark(
 
         # 监控器 tick
         perf_monitor.tick(packet, raw_results, wall_ms=(sched_ms + fus_ms + hud_ms + ring_ms), queue_depth=0, ingest_ms=dec_ms)
+
+        if idx % 30 == 0 or idx == target_frames:
+            logger.info(f"  ▶ [{mode_name}] 压测进度: {idx}/{target_frames} 帧 | 最新单帧耗时: {total_frame_ms:.1f}ms (调度推理: {sched_ms:.1f}ms)")
 
     t_bench_total = time.perf_counter() - t_bench_start
     actual_throughput_fps = target_frames / max(t_bench_total, 1e-4)
@@ -678,6 +700,8 @@ def main():
     provider.release()
 
     generate_system_benchmark_report(stress_res, streaming_res, args.report)
+    logger.info("🎉 全链路端到端性能基准评测顺利执行完毕！")
+    sys.exit(0)
 
 
 if __name__ == "__main__":

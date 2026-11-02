@@ -6,6 +6,7 @@ __pycache__/
 
 # Caches, logs and runtime events
 local_cache/
+local
 scratch/
 events/
 *.stackdump

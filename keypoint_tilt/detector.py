@@ -42,6 +42,8 @@ class PantographTiltDetector:
         install_bias_deg=2.0,
         rigid_alarm_thresh=None,
         use_rigid_alarm=False,
+        sliding_window_size=5,
+        min_consecutive_alarms=3,
         device=None,
     ):
         self.num_joints = num_joints
@@ -102,6 +104,8 @@ class PantographTiltDetector:
             install_bias_deg=install_bias_deg,
             rigid_alarm_thresh=rigid_alarm_thresh,
             use_rigid_alarm=use_rigid_alarm,
+            sliding_window_size=sliding_window_size,
+            min_consecutive_alarms=min_consecutive_alarms,
         )
 
     def predict(self, image_path_or_bgr):

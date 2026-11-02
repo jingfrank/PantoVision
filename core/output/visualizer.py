@@ -348,6 +348,8 @@ class Visualizer:
         tilt_res = results.get("tilt")
         if not (tilt_res and tilt_res.keypoints and len(tilt_res.keypoints) >= 4):
             return out
+        if tilt_res.extra.get("status") in ("INVALID_TOPOLOGY", "LOW_CONFIDENCE"):
+            return out
 
         kpts = tilt_res.keypoints
         p1, p2, p3, p4 = [(int(pt[0]), int(pt[1])) for pt in kpts[:4]]

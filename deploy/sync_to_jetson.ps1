@@ -9,7 +9,7 @@
 #>
 
 param (
-    [string]$JetsonIP = "172.10.1.5",
+    [string]$JetsonIP = "192.168.103.120",
     [string]$JetsonUser = "hirain",
     [string]$TargetDir = "/home/hirain/Desktop/gongwang_clean",
     [switch]$IncludeModels

@@ -7,18 +7,43 @@
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$BASE_DIR"
 
+# ==============================================================================
 # 自动关联持久化模型库（自适应 B/S 主程序随机 UUID 子目录部署，免去重复拷贝 1GB 模型）
-if [ ! -d "models" ] || [ ! -f "models/best.pt" ]; then
-    if [ -d "../models" ] && [ -f "../models/best.pt" ]; then
-        ln -sfn ../models models
-        echo "🔗 [模型探测] 已自动关联父级模型库: $(pwd)/models -> ../models"
-    elif [ -d "/models" ] && [ -f "/models/best.pt" ]; then
-        ln -sfn /models models
-        echo "🔗 [模型探测] 已自动关联全局模型库: $(pwd)/models -> /models"
-    elif [ -d "/hirain/hi_opt/algo/container_gongwang/models" ] && [ -f "/hirain/hi_opt/algo/container_gongwang/models/best.pt" ]; then
-        ln -sfn /hirain/hi_opt/algo/container_gongwang/models models
-        echo "🔗 [模型探测] 已自动关联标准持久化模型库: $(pwd)/models -> /hirain/hi_opt/algo/container_gongwang/models"
+# ==============================================================================
+NEED_LINK=true
+
+# 1. 如果当前 models 已经存在且包含有效模型权重文件，则无需重新关联
+if [ -e "models" ] && { [ -f "models/best.pt" ] || [ -f "models/best.engine" ] || [ -f "models/best.onnx" ]; }; then
+    NEED_LINK=false
+fi
+
+if [ "$NEED_LINK" = true ]; then
+    # 2. 如果存在死循环目录、空目录或已失效的软链接，先彻底清理
+    if [ -L "models" ]; then
+        rm -f "models"
+    elif [ -d "models" ]; then
+        rm -rf "models"
     fi
+
+    # 3. 按优先级寻找有效模型库（采用绝对路径，彻底杜绝相对路径递归死循环）
+    TARGET_MODELS=""
+    PARENT_DIR="$(cd .. 2>/dev/null && pwd)/models"
+    for CANDIDATE in "$PARENT_DIR" "/hirain/hi_opt/algo/container_gongwang/models" "/models"; do
+        if [ -d "$CANDIDATE" ] && { [ -f "$CANDIDATE/best.pt" ] || [ -f "$CANDIDATE/best.engine" ] || [ -f "$CANDIDATE/best.onnx" ]; }; then
+            TARGET_MODELS="$CANDIDATE"
+            break
+        fi
+    done
+
+    # 4. 建立绝对路径软链接
+    if [ -n "$TARGET_MODELS" ]; then
+        ln -sfn "$TARGET_MODELS" models
+        echo "🔗 [模型探测] 已安全关联模型库: ${BASE_DIR}/models -> ${TARGET_MODELS}"
+    else
+        echo "⚠️ [模型探测] 未在父级或标准路径探测到有效模型库，请检查模型文件是否存在！"
+    fi
+else
+    echo "✅ [模型探测] 本地 models 目录已存在有效模型，无需重新关联"
 fi
 
 # 1. 创建日志目录（放在 local_cache/logs 下，宿主机桌面直接可见）

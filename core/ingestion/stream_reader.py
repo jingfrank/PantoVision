@@ -255,6 +255,15 @@ def _rtsp_capture_worker(
         last_valid_frame_time = time.time()
         consecutive_read_fails = 0
 
+        # ── 全链路统计计数埋点 (read/fail/bad/sampled/put_ok/full) ─────────
+        last_stats_time = time.time()
+        stat_read = 0
+        stat_fail = 0
+        stat_bad = 0
+        stat_sampled = 0
+        stat_put_ok = 0
+        stat_full = 0
+
         while not stop_event.is_set() and cap.isOpened():
             # ── 阻塞点 3: 核心读帧双侧刷新心跳 ──────────────────────────
             shared_heartbeat.value = time.time()
@@ -262,8 +271,26 @@ def _rtsp_capture_worker(
             shared_heartbeat.value = time.time()
             now = time.time()
 
+            # ── 定时打印 5 秒统计大盘 ───────────────────────────────────
+            if (now - last_stats_time) >= 5.0:
+                elapsed_s = now - last_stats_time
+                fps_r = stat_read / elapsed_s if elapsed_s > 0 else 0.0
+                fps_p = stat_put_ok / elapsed_s if elapsed_s > 0 else 0.0
+                worker_logger.info(
+                    f"[RTSP-Stats] 过去 {elapsed_s:.1f}s: "
+                    f"read={stat_read} ({fps_r:.1f}fps) | "
+                    f"fail={stat_fail} | "
+                    f"bad={stat_bad} | "
+                    f"sampled={stat_sampled} | "
+                    f"put_ok={stat_put_ok} ({fps_p:.1f}fps) | "
+                    f"full={stat_full}"
+                )
+                last_stats_time = now
+                stat_read = stat_fail = stat_bad = stat_sampled = stat_put_ok = stat_full = 0
+
             # ── 软看门狗：读帧失败检测与有效帧超时控制 ───────────────────
             if not ret or frame is None:
+                stat_fail += 1
                 consecutive_read_fails += 1
                 if consecutive_read_fails >= 5 or (now - last_valid_frame_time) >= 5.0:
                     worker_logger.warning("[RTSP-Worker] 超过 5 秒无有效帧或连续读取失败，主动重新建立连接...")
@@ -271,18 +298,22 @@ def _rtsp_capture_worker(
                 _interruptible_sleep(0.01, step=0.01)
                 continue
 
+            stat_read += 1
+
             # 处理 BGRx 4 通道格式（nvvidconv 硬件转换输出），快速转换为标准 3 通道 BGR
             if frame.ndim == 3 and frame.shape[2] == 4:
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
 
             # 校验图像完整性，防止截断的残破帧流向下游引发检测器异常
             if frame.ndim != 3 or frame.shape[0] < 100 or frame.shape[1] < 100:
+                stat_bad += 1
                 continue
 
             consecutive_read_fails = 0
             last_valid_frame_time = now
 
             if (now - last_sample) >= sample_interval:
+                stat_sampled += 1
                 packet = FramePacket(
                     frame=frame,
                     timestamp=now,
@@ -294,16 +325,14 @@ def _rtsp_capture_worker(
                 frame_idx += 1
                 last_sample = now
 
-                # 队列满时丢弃最旧数据以保持生产者通畅
-                if frame_queue.full():
-                    try:
-                        frame_queue.get_nowait()
-                    except Exception:
-                        pass
+                # 队列满时直接丢弃当前新帧（不 put 即可），严禁子进程调用 get_nowait 造成跨进程 Pipe 争用死锁
                 try:
                     frame_queue.put_nowait(packet)
-                except Exception:
-                    pass
+                    stat_put_ok += 1
+                except queue.Full:
+                    stat_full += 1
+                except Exception as q_err:
+                    worker_logger.error(f"[RTSP-Worker] 投递帧队列异常: {q_err}")
 
         # ── 阻塞点 4: 断开释放双侧刷新心跳 ──────────────────────────────
         shared_heartbeat.value = time.time()
@@ -359,7 +388,7 @@ class RTSPStreamReader(BaseStreamSource):
         self.codec_type = codec_type
         self.gstreamer_latency_ms = gstreamer_latency_ms
         self.running = False
-        self.frame_queue = mp_ctx.Queue(maxsize=10)
+        self.frame_queue = mp_ctx.Queue(maxsize=2)
         self.stop_event = mp_ctx.Event()
         self.shared_heartbeat = mp_ctx.Value("d", time.time())
         self.process: Optional[mp.Process] = None

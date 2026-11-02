@@ -39,6 +39,39 @@ class PantographTiltAnalyzer:
         return float(np.degrees(np.arctan2(dy, dx)))
 
     @staticmethod
+    def validate_topology(coords, relative_tilt=0.0, max_physical_deg=20.0):
+        """
+        校验受电弓 4 关键点空间拓扑与物理姿态角有效性:
+        P1(左羊角), P2(左支架), P3(右支架), P4(右羊角)
+        """
+        if coords is None or len(coords) < 4:
+            return False, "KEYPOINTS_COUNT_LESS_THAN_4"
+        p1, p2, p3, p4 = coords[0], coords[1], coords[2], coords[3]
+
+        # 1. X 轴严格递增拓扑: P1_x < P2_x < P3_x < P4_x (从左至右展开)
+        if not (p1[0] < p2[0] < p3[0] < p4[0]):
+            return False, f"X_ORDER_VIOLATED: ({p1[0]:.1f}, {p2[0]:.1f}, {p3[0]:.1f}, {p4[0]:.1f})"
+
+        # 2. 跨度尺度校验
+        w_horn = p4[0] - p1[0]
+        w_support = p3[0] - p2[0]
+        if w_horn < 150.0:
+            return False, f"HORN_SPAN_TOO_SMALL: {w_horn:.1f}px"
+        if w_support < 50.0:
+            return False, f"SUPPORT_SPAN_TOO_SMALL: {w_support:.1f}px"
+
+        # 3. 支架基线与总跨度比例 (正常约为 0.4~0.6)
+        ratio = w_support / max(w_horn, 1.0)
+        if ratio < 0.20 or ratio > 0.85:
+            return False, f"SPAN_RATIO_ANOMALOUS: {ratio:.2f}"
+
+        # 4. 物理偏角合理性校验 (正常受电弓物理倾斜绝不可能出现翻转/垂直)
+        if abs(relative_tilt) > max_physical_deg:
+            return False, f"PHYSICAL_ANGLE_EXCEEDED: {relative_tilt:.2f}deg"
+
+        return True, "OK"
+
+    @staticmethod
     def calc_relative_angle(p1, p4, p2, p3):
         """
         Calculate relative angle of horn vector P1->P4 in the local coordinate frame
@@ -90,23 +123,31 @@ class PantographTiltAnalyzer:
         abs_rel = abs(relative_tilt)
         abs_rigid = abs(rigid_tilt)
 
-        # PURE CONDITION A: Structural parallelism fault detection only
-        # Completely immune to camera mounting displacement, vehicle roll, or vibration!
-        is_structural_alarm = abs_rel >= self.alarm_thresh
-        is_rigid_alarm = self.use_rigid_alarm and (self.rigid_alarm_thresh is not None) and (abs_rigid >= self.rigid_alarm_thresh)
+        # 0. 拓扑合理性与物理角度上限校验
+        is_valid_topo, topo_reason = self.validate_topology(coords, relative_tilt)
 
-        if is_structural_alarm or is_rigid_alarm:
-            current_status = "ALARM_TILT"
-            is_anomaly = True
-            severity = "CRITICAL"
-        elif abs_rel >= self.warning_thresh:
-            current_status = "WARNING_TILT"
-            is_anomaly = False
-            severity = "WARNING"
-        else:
-            current_status = "NORMAL"
+        if not is_valid_topo:
+            current_status = "INVALID_TOPOLOGY"
             is_anomaly = False
             severity = "NORMAL"
+        else:
+            # PURE CONDITION A: Structural parallelism fault detection only
+            # Completely immune to camera mounting displacement, vehicle roll, or vibration!
+            is_structural_alarm = abs_rel >= self.alarm_thresh
+            is_rigid_alarm = self.use_rigid_alarm and (self.rigid_alarm_thresh is not None) and (abs_rigid >= self.rigid_alarm_thresh)
+
+            if is_structural_alarm or is_rigid_alarm:
+                current_status = "ALARM_TILT"
+                is_anomaly = True
+                severity = "CRITICAL"
+            elif abs_rel >= self.warning_thresh:
+                current_status = "WARNING_TILT"
+                is_anomaly = False
+                severity = "WARNING"
+            else:
+                current_status = "NORMAL"
+                is_anomaly = False
+                severity = "NORMAL"
 
         self.history.append(is_anomaly)
         sustained_alarm = sum(self.history) >= self.min_consecutive_alarms
@@ -119,6 +160,8 @@ class PantographTiltAnalyzer:
         return {
             "is_anomaly": is_anomaly,
             "sustained_alarm": sustained_alarm,
+            "is_valid_topology": is_valid_topo,
+            "topology_reason": topo_reason,
             "status": current_status,
             "severity": severity,
             "tilt_direction": direction,
